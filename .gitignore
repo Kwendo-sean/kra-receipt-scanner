@@ -34,7 +34,7 @@ receipt-samples/
 tests/fixtures/generated/
 
 # --- Python ---
-.venv/
+.venv*/
 venv/
 __pycache__/
 *.pyc
