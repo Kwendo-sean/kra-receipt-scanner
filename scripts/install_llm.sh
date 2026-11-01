@@ -39,12 +39,13 @@ sed -e "s#__USER__#${USER_NAME}#g" -e "s#__LLM_DIR__#${LLM_DIR}#g" -e "s#__MODEL
 sudo systemctl daemon-reload
 sudo systemctl enable --now receipt-llm
 echo "Waiting for the model to load..."
-for _ in $(seq 1 60); do
-  if curl -s --max-time 2 http://127.0.0.1:8081/v1/models >/dev/null; then break; fi
+# /health returns 503 while the model loads and 200 once it is ready
+for _ in $(seq 1 90); do
+  if curl -sf --max-time 2 http://127.0.0.1:8081/health >/dev/null; then break; fi
   sleep 2
 done
 curl -s http://127.0.0.1:8081/v1/models; echo
 echo "Quick test:"
-time curl -s http://127.0.0.1:8081/v1/chat/completions -H 'Content-Type: application/json' \
+time curl -sf http://127.0.0.1:8081/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"In one sentence: total spent KES 1,600.00, VAT KES 193.10."}],"max_tokens":60}' \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
