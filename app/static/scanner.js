@@ -10,6 +10,12 @@
   const STABLE_DIFF = 5;         // mean abs pixel diff between samples
   const STABLE_SAMPLES = 4;      // ~0.55 s steady
   const COOLDOWN_MS = 1800;
+  // Long receipts: the bottom STRIP of the last section must reappear at the top
+  // of the live frame. TARGET is where its end should sit (~25% overlap).
+  const STRIP = 0.25;
+  const TARGET = 0.25, ALIGN_LO = 0.15, ALIGN_HI = 0.36;
+  const MATCH_W = 80;            // matching resolution (cheap enough for ~7 Hz)
+  const MIN_SCORE = 0.68;        // zero-mean normalised cross-correlation
 
   class Scanner {
     constructor(opts) {
@@ -17,6 +23,10 @@
       this.guide = opts.guide;
       this.onSample = opts.onSample || (() => {});
       this.onAutoCapture = opts.onAutoCapture || (() => {});
+      this.onAlign = opts.onAlign || (() => {});
+      this.ref = null;           // reduced gray of the last long-receipt section
+      this.align = null;
+      this.lastReduced = null;
       this.stream = null;
       this.track = null;
       this.imageCapture = null;
@@ -111,6 +121,11 @@
         diff = s / (n / 3);
       }
       this.prev = gray;
+      this.lastReduced = reduce(gray, sw, sh);
+      if (this.ref) {
+        this.align = matchRef(this.ref, this.lastReduced);
+        this.onAlign(this.align);
+      }
       this.stableCount = diff < STABLE_DIFF ? this.stableCount + 1 : 0;
       const now = Date.now();
       this.recent.push({ t: now, s: sharp });
@@ -120,10 +135,32 @@
       const isSharp = sharp >= threshold && sharp >= MIN_SHARP;
       const stable = this.stableCount >= STABLE_SAMPLES;
       this.onSample({ sharp, threshold: MIN_SHARP, isSharp, stable, diff });
-      if (this.auto && this.armed && isSharp && stable && now - this.lastCapture > COOLDOWN_MS) {
+      const placed = !this.ref || (this.align && this.align.aligned);
+      if (this.auto && this.armed && placed && isSharp && stable && now - this.lastCapture > COOLDOWN_MS) {
         this.lastCapture = now;
         this.onAutoCapture();
       }
+    }
+
+    // Long receipts: remember the section just captured (reduced gray, for live
+    // matching) and return a crisp crop of its bottom strip for the overlay.
+    snapshot() {
+      if (!this.lastReduced) return null;
+      const g = this.guideRect();
+      let ghost = null;
+      if (g) {
+        const w = 540, h = Math.round(g.h * w / g.w), sh = Math.max(1, Math.round(h * STRIP));
+        const c = document.createElement("canvas");
+        c.width = w; c.height = sh;
+        c.getContext("2d").drawImage(this.video, g.x, g.y + g.h * (1 - STRIP), g.w, g.h * STRIP, 0, 0, w, sh);
+        ghost = c.toDataURL("image/jpeg", 0.8);
+      }
+      return { ref: this.lastReduced, ghost };
+    }
+
+    setReference(snap) {
+      this.ref = snap ? snap.ref : null;
+      this.align = null;
     }
 
     // Full-resolution JPEG still. Uses ImageCapture.takePhoto when available
@@ -157,5 +194,66 @@
     }
   }
 
+  // 3x box-downsample of the SAMPLE_W gray frame to MATCH_W columns
+  function reduce(gray, sw, sh) {
+    const f = sw / MATCH_W, w = MATCH_W, h = Math.max(1, Math.floor(sh / f));
+    const out = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let s = 0, n = 0;
+        const y0 = Math.floor(y * f), x0 = Math.floor(x * f);
+        for (let dy = 0; dy < f; dy++) for (let dx = 0; dx < f; dx++) {
+          const yy = y0 + dy, xx = x0 + dx;
+          if (yy < sh && xx < sw) { s += gray[yy * sw + xx]; n++; }
+        }
+        out[y * w + x] = s / n;
+      }
+    }
+    return { g: out, w, h };
+  }
+
+  // Where does the bottom STRIP of `ref` appear in `live`? Zero-mean NCC over
+  // vertical offsets. endFrac = where the previous section ends, as a fraction
+  // of the live frame height (1.0 = not moved yet; TARGET = right overlap).
+  function matchRef(ref, live) {
+    const w = Math.min(ref.w, live.w);
+    const ps = Math.floor(ref.h * (1 - STRIP)), H = ref.h - ps;
+    if (H < 4 || live.h < H) return { found: false, reason: "small" };
+    // texture check on the whole strip
+    let m0 = 0, v0 = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < w; x++) m0 += ref.g[(ps + y) * ref.w + x];
+    m0 /= H * w;
+    for (let y = 0; y < H; y++) for (let x = 0; x < w; x++) { const d = ref.g[(ps + y) * ref.w + x] - m0; v0 += d * d; }
+    if (Math.sqrt(v0 / (H * w)) < 6) return { found: false, reason: "blank" };   // blank paper: nothing to lock onto
+    // oy < 0: only the lower part of the strip is still visible at the top
+    // (moved too far); compare just the visible rows (at least 40% of the strip).
+    const minRows = Math.ceil(H * 0.4);
+    let best = -1, bestY = 0;
+    for (let oy = -(H - minRows); oy + H <= live.h; oy++) {
+      const r0 = Math.max(0, -oy), rows = H - r0;
+      let am = 0, bm = 0;
+      for (let y = r0; y < H; y++) for (let x = 0; x < w; x++) { am += ref.g[(ps + y) * ref.w + x]; bm += live.g[(oy + y) * live.w + x]; }
+      am /= rows * w; bm /= rows * w;
+      let cov = 0, av = 0, bv = 0;
+      for (let y = r0; y < H; y++) {
+        for (let x = 0; x < w; x++) {
+          const p = ref.g[(ps + y) * ref.w + x] - am, q = live.g[(oy + y) * live.w + x] - bm;
+          cov += p * q; av += p * p; bv += q * q;
+        }
+      }
+      // partial overlaps must score a bit higher (fewer rows = easier to fake)
+      const score = cov / (Math.sqrt(av * bv) + 1e-6) - (r0 ? 0.08 * r0 / H : 0);
+      if (score > best) { best = score; bestY = oy; }
+    }
+    if (best < MIN_SCORE) return { found: false, reason: "lost", score: best };
+    const endFrac = (bestY + H) / live.h;
+    return { found: true, score: best, endFrac, aligned: endFrac >= ALIGN_LO && endFrac <= ALIGN_HI,
+             tooHigh: endFrac < ALIGN_LO, target: TARGET };
+  }
+
+  Scanner._reduce = reduce;      // exposed for tests
+  Scanner._matchRef = matchRef;
+  Scanner.STRIP = STRIP;
+  Scanner.TARGET = TARGET;
   window.Scanner = Scanner;
 })();

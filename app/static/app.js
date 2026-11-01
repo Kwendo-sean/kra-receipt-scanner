@@ -93,7 +93,9 @@
   // ================================================================ SCAN
   const scan = {
     mode: "single", receiptId: null, frames: [], retakeIdx: null, uploads: new Set(), busy: false,
+    snaps: {},          // idx -> {ref, ghost}: what each long-receipt section ended with
   };
+  let lastAligned = false;
   const scanner = new window.Scanner({
     video: $("#video"), guide: $("#guide"),
     onSample: ({ sharp, threshold, isSharp, stable }) => {
@@ -106,12 +108,57 @@
       $("#hud-dot").classList.toggle("ok", isSharp && stable);
       $("#guide-tag").textContent = isSharp && stable ? "SHARP · STEADY" : isSharp ? "HOLD STEADY" : "ALIGN RECEIPT";
       if (scan.busy) return;
-      const waiting = scan.mode === "multi" && !scanner.armed;
-      $("#hint").textContent = waiting ? "Tap “Next section”, slide down so ~25% overlaps, hold steady"
-        : !isSharp ? "Move closer / let it focus" : !stable ? "Hold steady…" : (scanner.auto ? "Capturing…" : "Tap the shutter");
+      if (scan.mode === "multi" && scanner.ref) return;   // long-receipt hints come from onAlign
+      $("#hint").textContent = !isSharp ? "Move closer / let it focus" : !stable ? "Hold steady…" : (scanner.auto ? "Capturing…" : "Tap the shutter");
     },
     onAutoCapture: () => captureNow(),
+    onAlign: (a) => showAlign(a),
   });
+
+  // Green "continue from here" line: where the previous section ended, tracked live.
+  function showAlign(a) {
+    const line = $("#cont-line"), guide = $("#guide");
+    if (!a || !a.found) {
+      line.classList.add("hidden");
+      guide.classList.remove("aligned");
+      lastAligned = false;
+      if (!scan.busy) $("#hint").textContent = a && a.reason === "blank"
+        ? "Blank paper at the overlap: capture manually when ~¼ overlaps"
+        : "Can't see the last section: move back up a little";
+      return;
+    }
+    line.classList.remove("hidden");
+    line.style.top = (Math.min(1, a.endFrac) * 100).toFixed(1) + "%";
+    line.classList.toggle("aligned", a.aligned);
+    guide.classList.toggle("aligned", a.aligned);
+    $("#cont-label").textContent = a.aligned ? "ALIGNED · HOLD STEADY" : a.tooHigh ? "TOO FAR · MOVE BACK UP" : "CONTINUE FROM HERE";
+    if (a.aligned && !lastAligned && navigator.vibrate) navigator.vibrate(40);
+    lastAligned = a.aligned;
+    if (scan.busy) return;
+    $("#hint").textContent = a.aligned ? (scanner.auto ? "Aligned: capturing…" : "Aligned: tap the shutter")
+      : a.tooHigh ? "Too far: move back up until the green line meets the marker"
+        : "Slide down until the green line meets the dashed marker";
+  }
+
+  // Which section should the next shot continue from? (the last one, or the
+  // one before a section being retaken)
+  function applyReference() {
+    const ghost = $("#ghost");
+    let snap = null;
+    if (scan.mode === "multi" && scan.frames.length) {
+      const idxs = scan.frames.map((f) => f.idx).sort((a, b) => a - b);
+      const prevIdx = scan.retakeIdx !== null ? idxs.filter((i) => i < scan.retakeIdx).pop() : idxs[idxs.length - 1];
+      snap = prevIdx === undefined ? null : scan.snaps[prevIdx] || null;
+    }
+    scanner.setReference(snap);
+    lastAligned = false;
+    $("#cont-line").classList.add("hidden");
+    $("#guide").classList.remove("aligned");
+    if (snap && snap.ghost) {
+      ghost.style.backgroundImage = `url("${snap.ghost}")`;
+      ghost.classList.remove("hidden");
+    } else ghost.classList.add("hidden");
+  }
 
   async function startCamera() {
     if (scanner.running) return;
@@ -136,7 +183,6 @@
     scan.mode = m;
     $("#mode-single").setAttribute("aria-pressed", m === "single");
     $("#mode-multi").setAttribute("aria-pressed", m === "multi");
-    scanner.armed = true;
     updateScanButtons();
   }
   $("#mode-single").addEventListener("click", () => setMode("single"));
@@ -146,26 +192,28 @@
     e.currentTarget.setAttribute("aria-pressed", scanner.auto);
   });
   $("#shutter").addEventListener("click", () => captureNow());
-  $("#btn-next").addEventListener("click", () => {
-    scanner.armed = true; scan.retakeIdx = null;
-    $("#hint").textContent = "Slide down, keep ~25% overlap with the previous section";
-    updateScanButtons();
+  $("#btn-undo").addEventListener("click", async () => {
+    const last = scan.frames.slice().sort((a, b) => a.idx - b.idx).pop();
+    if (!last) return;
+    try { await api("DELETE", `/api/receipts/${scan.receiptId}/frames/${last.idx}`); } catch (e) { /* ignore */ }
+    scan.frames = scan.frames.filter((x) => x !== last);
+    delete scan.snaps[last.idx];
+    URL.revokeObjectURL(last.url);
+    scan.retakeIdx = null;
+    renderThumbs();
+    toast("Last section removed");
   });
   $("#btn-done").addEventListener("click", () => finishReceipt());
 
   function updateScanButtons() {
     const multi = scan.mode === "multi";
-    $("#btn-next").classList.toggle("hidden", !multi);
+    $("#btn-undo").classList.toggle("hidden", !multi);
     $("#btn-done").classList.toggle("hidden", !multi);
-    $("#btn-next").disabled = !scan.frames.length || scanner.armed;
+    $("#btn-undo").disabled = !scan.frames.length;
     $("#btn-done").disabled = !scan.frames.length;
     $("#thumbs").classList.toggle("hidden", !multi);
-    const ghost = $("#ghost");
-    const last = scan.frames[scan.frames.length - 1];
-    if (multi && last && scanner.armed && scan.retakeIdx === null) {
-      ghost.style.backgroundImage = `url("${last.url}")`;
-      ghost.classList.remove("hidden");
-    } else ghost.classList.add("hidden");
+    $("#target-mark").classList.toggle("hidden", !(multi && scan.frames.length));
+    applyReference();
   }
 
   async function ensureReceipt() {
@@ -175,8 +223,8 @@
 
   async function captureNow() {
     if (scan.busy || !scanner.running) return;
-    if (scan.mode === "multi" && !scanner.armed && scan.retakeIdx === null) { toast("Tap “Next section” first"); return; }
     scan.busy = true;
+    const snap = scan.mode === "multi" ? scanner.snapshot() : null;
     $("#shutter").classList.add("busy");
     $("#hint").textContent = "Captured";
     try {
@@ -187,8 +235,8 @@
       const existing = scan.frames.find((f) => f.idx === idx);
       if (existing) { URL.revokeObjectURL(existing.url); existing.url = url; existing.state = "uploading"; }
       else scan.frames.push({ idx, url, state: "uploading" });
+      if (snap) scan.snaps[idx] = snap;
       scan.retakeIdx = null;
-      scanner.armed = false;
       renderThumbs();
       const fd = new FormData();
       fd.append("file", blob, `frame${idx}.jpg`);
@@ -205,7 +253,6 @@
     } finally {
       scan.busy = false;
       $("#shutter").classList.remove("busy");
-      if (scan.mode === "single") scanner.armed = true;
       updateScanButtons();
     }
   }
@@ -225,13 +272,13 @@
       el("img", { src: f.url, class: "detail-img", alt: "Captured section" }),
       el("div", { class: "row" },
         el("button", { class: "btn primary", type: "button", onclick: () => {
-          scan.retakeIdx = f.idx; scanner.armed = true; closeSheet();
+          scan.retakeIdx = f.idx; closeSheet();
           $("#hint").textContent = "Retake: line up this section again";
           updateScanButtons();
         } }, "Retake this section"),
         el("button", { class: "btn danger", type: "button", onclick: async () => {
           try { await api("DELETE", `/api/receipts/${scan.receiptId}/frames/${f.idx}`); } catch (e) { /* ignore */ }
-          scan.frames = scan.frames.filter((x) => x !== f); URL.revokeObjectURL(f.url); closeSheet(); renderThumbs();
+          scan.frames = scan.frames.filter((x) => x !== f); delete scan.snaps[f.idx]; URL.revokeObjectURL(f.url); closeSheet(); renderThumbs();
         } }, "Delete"))));
   }
 
@@ -245,7 +292,7 @@
       watching.add(scan.receiptId);
     } catch (e) { toast(e.message); return; }
     scan.frames.forEach((f) => URL.revokeObjectURL(f.url));
-    scan.frames = []; scan.receiptId = null; scan.retakeIdx = null; scanner.armed = true;
+    scan.frames = []; scan.snaps = {}; scan.receiptId = null; scan.retakeIdx = null;
     renderThumbs();
     pollQueue();
   }

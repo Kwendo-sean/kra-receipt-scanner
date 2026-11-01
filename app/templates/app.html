@@ -34,7 +34,11 @@
 <!-- ============ SCAN (phone only) ============ -->
 <section id="view-scan" class="scanner hidden" aria-label="Scanner" data-phone-only>
   <video id="video" playsinline muted autoplay></video>
-  <div class="guide" id="guide"><i></i><span class="guide-tag" id="guide-tag">ALIGN RECEIPT</span><div class="ghost hidden" id="ghost"></div></div>
+  <div class="guide" id="guide"><i></i><span class="guide-tag" id="guide-tag">ALIGN RECEIPT</span>
+    <div class="ghost hidden" id="ghost"></div>
+    <div class="target-mark hidden" id="target-mark"><span>MATCH THE LAST SECTION HERE</span></div>
+    <div class="cont-line hidden" id="cont-line"><span id="cont-label">CONTINUE FROM HERE</span></div>
+  </div>
   <div class="hud">
     <div class="hud-top">
       <div class="row"><span class="live-dot" id="hud-dot"></span><span>Live capture</span></div>
@@ -56,7 +60,7 @@
   <div class="hint" id="hint">Starting camera…</div>
   <div class="thumbs" id="thumbs"></div>
   <div class="scan-bottom">
-    <button type="button" class="scan-btn" id="btn-next" disabled>Next section</button>
+    <button type="button" class="scan-btn" id="btn-undo" disabled>Undo last</button>
     <button type="button" class="shutter" id="shutter" aria-label="Capture"></button>
     <button type="button" class="scan-btn primary" id="btn-done" disabled>Done</button>
   </div>

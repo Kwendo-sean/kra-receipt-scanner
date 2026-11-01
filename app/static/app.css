@@ -144,7 +144,20 @@ legend { padding: 0; margin-bottom: .3rem; font: 500 10px/1.4 var(--mono); text-
 .guide.sharp::before, .guide.sharp::after, .guide.sharp i::before, .guide.sharp i::after { border-color: #a8cda1; }
 .guide-tag { position: absolute; left: 0; top: -22px; font: 500 9.5px var(--mono); letter-spacing: .1em; color: #f2f0e9; background: #ef433d; padding: 3px 6px; }
 .guide.sharp .guide-tag { background: #a8cda1; color: #070808; }
-.ghost { position: absolute; left: 0; right: 0; top: 0; height: 25%; opacity: .35; background-size: 100% auto; background-position: bottom; background-repeat: no-repeat; border-bottom: 1px dashed #e8b04a; }
+/* long receipts: crisp strip of the last section + where it must sit + live green line */
+.ghost { position: absolute; left: 0; right: 0; top: 0; height: 25%; opacity: .62; background-size: 100% 100%; background-repeat: no-repeat;
+  filter: contrast(1.25) saturate(0); outline: 1px solid rgba(232,176,74,.6); mix-blend-mode: normal; }
+.target-mark { position: absolute; left: -10px; right: -10px; top: 25%; height: 0; border-top: 2px dashed #e8b04a; }
+.target-mark span { position: absolute; right: 10px; top: 4px; font: 500 9px var(--mono); letter-spacing: .1em; color: #070808; background: #e8b04a; padding: 2px 5px; }
+.cont-line { position: absolute; left: -14px; right: -14px; height: 0; border-top: 4px solid #3dff86;
+  box-shadow: 0 0 12px 2px rgba(61,255,134,.7); transition: top .12s linear; z-index: 2; }
+.cont-line::before, .cont-line::after { content: ""; position: absolute; top: -9px; border: 7px solid transparent; }
+.cont-line::before { left: -2px; border-left-color: #3dff86; }
+.cont-line::after { right: -2px; border-right-color: #3dff86; }
+.cont-line span { position: absolute; left: 14px; top: -24px; font: 500 9.5px var(--mono); letter-spacing: .1em; color: #04140b; background: #3dff86; padding: 3px 6px; white-space: nowrap; }
+.cont-line.aligned { border-top-width: 6px; }
+.guide.aligned { box-shadow: 0 0 0 9999px rgba(7,8,8,.45), inset 0 0 0 3px #3dff86; }
+.guide.aligned::before, .guide.aligned::after, .guide.aligned i::before, .guide.aligned i::after { border-color: #3dff86; }
 .hud {
   position: absolute; z-index: 4; top: 12px; left: 12px; right: 12px; padding: 10px 12px;
   background: rgba(7,8,8,.62); border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(7px);

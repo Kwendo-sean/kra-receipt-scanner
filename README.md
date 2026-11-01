@@ -84,9 +84,13 @@ You can see and revoke paired phones under **Settings → Paired phones**.
 ## 4. Scanning
 
 - **Short receipts:** hold the phone over the receipt inside the frame. The meter turns green when the image is sharp, and the app captures automatically once you hold steady. You can also tap the shutter yourself. The receipt is queued straight away, so you can keep scanning.
-- **Long receipts:** switch to **Long** and capture the top section. Tap **Next section**, then slide the phone down so that about 25% of the receipt overlaps the previous shot; a faint strip of the last shot helps you line it up. Repeat to the end, then tap **Done**.
-  - Tap a thumbnail to **retake** or delete that section.
-  - The Pi stitches the sections together (ORB features with a near-pure-translation homography, falling back to vertical template matching) and runs OCR on the tall image in tiles. If stitching fails, it runs OCR on each section and removes the lines repeated in the overlaps.
+- **Long receipts:** switch to **Long** and capture the top section. Then slide the phone down the receipt:
+  - The top quarter of the frame shows the end of your last shot, with a dashed amber **marker** below it.
+  - A glowing **green line** shows where your last shot ended. The phone tracks it live by matching the camera view against that shot, so the line moves up as you slide down.
+  - Stop when the green line reaches the marker (about 25% overlap). The frame turns green, the phone buzzes, and the section is captured. If you go too far, it tells you to move back up.
+  - Repeat to the end of the receipt, then tap **Done**. **Undo last** removes the latest section. Tap a thumbnail to **retake** a section; the line then tracks from the section before it.
+  - Blank paper in the overlap gives the phone nothing to match. In that case, capture manually with the shutter.
+  - On the Pi, the sections are stitched together (ORB features with a near-pure-translation homography, falling back to vertical template matching). OCR then runs on the tall image in tiles. If stitching fails, OCR runs on each section and the lines repeated in the overlaps are removed.
 - **Queue:** status chips show each receipt while it is processed. Tap one when it says *done* to check the fields against the photo, fix anything, and save.
 
 **Pre-processing:** the Pi finds the paper edges, crops the perspective, deskews, flattens uneven light with background division and CLAHE (which helps with faded thermal paper), and limits the image width. It also decodes the KRA eTIMS QR code with OpenCV and stores it as evidence. It never fetches the code's URL.
