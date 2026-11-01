@@ -70,3 +70,9 @@ def test_chat_caps_max_tokens(monkeypatch):
     monkeypatch.setattr(llm.httpx, "Client", C)
     assert llm.chat("s", "u", max_tokens=5000) == "ok"
     assert sent["max_tokens"] <= 256
+
+
+def test_think_block_removed(monkeypatch):
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: "<think>maybe 999 or 1,000</think>Claim KES 1,206.90.")
+    text, status = llm.write_paragraph("x", FACTS, "T")
+    assert status == "llm" and text == "Claim KES 1,206.90."

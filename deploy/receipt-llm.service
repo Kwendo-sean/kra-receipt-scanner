@@ -1,0 +1,19 @@
+[Unit]
+Description=Local LLM for receipt-report prose (llama-server, 127.0.0.1:8081)
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+# 4 threads; the worker never runs OCR and a report at the same time.
+# Context 2048 leaves headroom (the app keeps each request under ~600 tokens).
+ExecStart=__LLM_DIR__/llama.cpp/build/bin/llama-server -m __MODEL__ --host 127.0.0.1 --port 8081 -t 4 -c 2048 --parallel 1 --no-webui
+Restart=on-failure
+RestartSec=5
+MemoryMax=1800M
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

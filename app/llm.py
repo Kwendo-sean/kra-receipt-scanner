@@ -113,6 +113,8 @@ def facts_to_text(facts: dict) -> str:
 
 def sanitize(text: str) -> str:
     """Plain text only: strip any markup the model produced. (Templates also autoescape.)"""
+    # reasoning models (e.g. Qwen3) may emit a <think> block first: drop it whole
+    text = re.sub(r"<think>.*?(</think>|$)", "", text, flags=re.S | re.I)
     t = bleach.clean(text, tags=[], attributes={}, strip=True)
     t = re.sub(r"[*_#`>]+", "", t)
     t = re.sub(r"[ \t]+", " ", t)

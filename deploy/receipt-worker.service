@@ -1,6 +1,6 @@
 [Unit]
 Description=KRA receipt scanner - worker (OCR, reports, email outbox)
-After=network-online.target treplex-llm.service
+After=network-online.target receipt-llm.service
 Wants=network-online.target
 
 [Service]
