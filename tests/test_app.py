@@ -490,3 +490,44 @@ def test_ocr_model_size_setting(tmp_settings, monkeypatch):
         ocr.model_paths("huge", "small")
     with pytest.raises(FileNotFoundError, match="fetch_models"):
         ocr.model_paths("small", "medium")
+
+
+# ------------------------------------------------------------------ iPhone Shortcut (Apple document scanner)
+
+
+def test_shortcut_upload_with_upload_only_key(client):
+    from app import receipts
+    csrf = _pair(client)
+    j = client.post("/api/apikeys", json={"name": "Sean's iPhone"}, headers={"X-CSRF-Token": csrf}).json()
+    key, url = j["key"], j["upload_url"]
+    assert key.startswith("rsk_") and url.endswith("/api/shortcut/upload")
+    phone = TestClient(client.app, base_url="https://testserver")   # no session cookie, like Shortcuts
+    auth_h = {"Authorization": f"Bearer {key}"}
+    # raw body (Shortcuts: Request Body = File)
+    r = phone.post("/api/shortcut/upload", content=_pdf_with_receipt(), headers=auth_h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    rid = body["ids"][0]
+    assert "sent to the Pi" in body["message"] and body["url"].endswith(f"#receipt-{rid}")
+    assert receipts.get(rid)["status"] == "queued"
+    # multipart also works
+    r = phone.post("/api/shortcut/upload", files={"file": ("scan.jpg", _jpeg(), "image/jpeg")}, headers=auth_h)
+    assert r.status_code == 200
+    # the key cannot read anything
+    for u in ["/api/receipts", f"/api/receipts/{rid}", f"/media/receipts/{rid}/frame/0.jpg", "/api/apikeys"]:
+        assert phone.get(u, headers=auth_h).status_code == 401, u
+    # bad / missing / revoked keys
+    assert phone.post("/api/shortcut/upload", content=b"x", headers={"Authorization": "Bearer rsk_nope"}).status_code == 401
+    assert phone.post("/api/shortcut/upload", content=b"x").status_code == 401
+    kid = client.get("/api/apikeys").json()["keys"][0]["id"]
+    client.delete(f"/api/apikeys/{kid}", headers={"X-CSRF-Token": csrf})
+    assert phone.post("/api/shortcut/upload", content=_jpeg(), headers=auth_h).status_code == 401
+
+
+def test_shortcut_upload_rejects_empty_and_junk(client):
+    csrf = _pair(client)
+    key = client.post("/api/apikeys", json={}, headers={"X-CSRF-Token": csrf}).json()["key"]
+    phone = TestClient(client.app, base_url="https://testserver")
+    h = {"Authorization": f"Bearer {key}"}
+    assert phone.post("/api/shortcut/upload", content=b"", headers=h).status_code == 400
+    assert phone.post("/api/shortcut/upload", content=b"not an image", headers=h).status_code == 400

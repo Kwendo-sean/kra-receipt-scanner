@@ -141,6 +141,17 @@ CREATE TABLE IF NOT EXISTS reports (
     error TEXT
 );
 
+CREATE TABLE IF NOT EXISTS api_keys (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    key_hash TEXT NOT NULL UNIQUE,
+    scope TEXT NOT NULL DEFAULT 'upload',      -- upload only: cannot read anything
+    created_at REAL NOT NULL,
+    last_used REAL,
+    uses INTEGER NOT NULL DEFAULT 0,
+    revoked INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL

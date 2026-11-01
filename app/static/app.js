@@ -757,6 +757,7 @@
       el("li", {}, el("div", { class: "main", text: "Jobs in queue" }), el("span", { class: "pill", text: String(st.jobs_pending) })),
       el("li", {}, el("div", { class: "main", text: "Version" }), el("span", { class: "pill", text: st.version })));
     renderSmtp(st.smtp);
+    loadKeys();
     $("#recipient-list").replaceChildren(...rec.recipients.map((r) => el("li", {},
       el("div", { class: "main" }, el("div", { class: "title", text: r.email })),
       el("span", { class: "pill " + (r.confirmed ? "ok" : "warn"), text: r.confirmed ? "confirmed" : "awaiting code" }),
@@ -813,6 +814,35 @@
       pairTimer = setTimeout(() => $("#pair-another-box").classList.add("hidden"), j.ttl * 1000);
     } catch (e) { toast(e.message); }
   });
+  // ---------------------------------------------------------------- iPhone Shortcut keys
+  async function loadKeys() {
+    let j;
+    try { j = await api("GET", "/api/apikeys"); } catch (e) { return; }
+    $("#sc-keys").replaceChildren(...j.keys.map((k) => el("li", {},
+      el("div", { class: "main" }, el("div", { class: "title", text: k.name }),
+        el("div", { class: "small muted", text: `${k.uses} upload(s)` + (k.last_used ? ` · last ${when(k.last_used)}` : "") })),
+      el("span", { class: "pill", text: "upload only" }),
+      el("button", { class: "btn small danger", type: "button", onclick: async () => { await api("DELETE", `/api/apikeys/${k.id}`); loadKeys(); } }, "Revoke"))));
+  }
+  function copyRow(label, value) {
+    const btn = el("button", { class: "btn small", type: "button" }, "Copy");
+    btn.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(value); btn.textContent = "Copied"; }
+      catch (e) { toast("Select and copy the text manually"); }
+    });
+    return [el("dt", { text: label }), el("dd", {}, el("code", { text: value }), " ", btn)];
+  }
+  $("#sc-create").addEventListener("click", async () => {
+    try {
+      const j = await api("POST", "/api/apikeys", { name: IS_PHONE ? "iPhone Shortcut" : "Shortcut" });
+      const out = $("#sc-out");
+      out.replaceChildren(...copyRow("Upload address", j.upload_url), ...copyRow("Bearer key", "Bearer " + j.key),
+        el("dt", { text: "Note" }), el("dd", { class: "small muted", text: "The key is shown only now. It can upload receipts but cannot read anything; revoke it below if the phone is lost." }));
+      out.classList.remove("hidden");
+      loadKeys();
+    } catch (e) { toast(e.message); }
+  });
+
   $("#logout").addEventListener("click", async () => {
     try { await api("POST", "/api/logout"); } catch (e) { /* ignore */ }
     location.href = "/";
@@ -860,5 +890,7 @@
     history.replaceState(null, "", "/");
   }
   sideStatus();
-  show(location.hash.slice(1) || views[0]);
+  const deep = /^#receipt-(\d+)$/.exec(location.hash);
+  if (deep) { show("receipts"); openReceipt(Number(deep[1])); watching.add(Number(deep[1])); }
+  else show(location.hash.slice(1) || views[0]);
 })();

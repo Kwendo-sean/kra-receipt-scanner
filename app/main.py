@@ -253,6 +253,62 @@ async def import_receipts(files: list[UploadFile] = File(...), one_receipt: bool
     return {"ids": ids}
 
 
+# ------------------------------------------------------------------ iPhone Shortcut upload
+
+
+@app.post("/api/shortcut/upload")
+async def shortcut_upload(request: Request):
+    """Called by the iPhone Shortcut after Apple's 'Scan Documents' action.
+    Auth: 'Authorization: Bearer rsk_...' (upload-only key, no cookie, no CSRF).
+    Body: the scanned file as the raw request body, or multipart field 'file'."""
+    key = auth.api_key_from_header(request.headers.get("authorization"))
+    if not key:
+        raise HTTPException(401, "Invalid or revoked Shortcut key")
+    if auth.pair_rate_limited(f"key:{key['id']}"):
+        raise HTTPException(429, "Too many uploads; wait a few minutes")
+    files: list[tuple[str, bytes]] = []
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("multipart/form-data"):
+        form = await request.form()
+        for v in form.values():
+            if hasattr(v, "read"):
+                files.append((getattr(v, "filename", "") or "scan", await v.read()))
+    else:
+        body = await request.body()
+        if body:
+            files.append((request.headers.get("x-filename", "scan"), body))
+    if not files:
+        raise HTTPException(400, "No file received: set the request body to the scanned document")
+    try:
+        ids = receipts.import_files(files, one_receipt=False)
+    except receipts.ValidationError as e:
+        raise _bad(e)
+    for rid in ids:
+        db.audit(rid, "uploaded_by_shortcut", new={"key": key["name"]}, actor="shortcut")
+    base = _base_url(request)
+    msg = (f"Receipt #{ids[0]} sent to the Pi: reading now" if len(ids) == 1
+           else f"{len(ids)} receipts sent to the Pi: reading now")
+    return {"ok": True, "ids": ids, "message": msg, "url": f"{base}/#receipt-{ids[-1]}"}
+
+
+@app.get("/api/apikeys")
+def get_api_keys(request: Request, sess: dict = Depends(require_session)):
+    return {"keys": auth.list_api_keys(), "upload_url": f"{_base_url(request)}/api/shortcut/upload"}
+
+
+@app.post("/api/apikeys")
+async def new_api_key(request: Request, sess: dict = Depends(require_session)):
+    body = await _json(request)
+    token = auth.create_api_key(str(body.get("name") or "iPhone Shortcut"))
+    return {"key": token, "upload_url": f"{_base_url(request)}/api/shortcut/upload"}
+
+
+@app.delete("/api/apikeys/{key_id}")
+def delete_api_key(key_id: int, sess: dict = Depends(require_session)):
+    auth.revoke_api_key(key_id)
+    return {"ok": True}
+
+
 @app.delete("/api/receipts/{rid}/frames/{idx}")
 def delete_frame(rid: int, idx: int, sess: dict = Depends(require_session)):
     receipts.delete_frame(rid, idx)

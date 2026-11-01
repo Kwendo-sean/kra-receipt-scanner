@@ -199,6 +199,26 @@
         <label class="check"><input type="checkbox" id="auto-monthly"> Email last month's VAT schedule + compliance on the 1st–5th</label>
       </div>
       <div class="card stack">
+        <div class="card-head"><h2>iPhone document scanner</h2><span class="section-code">APPLE SHORTCUT</span></div>
+        <p class="small muted">Use the iPhone's own scanner (box around the receipt, auto-capture, flattening) and send
+          each scan straight to the Pi with one tap. Build the Shortcut once:</p>
+        <ol class="small steps" id="sc-steps">
+          <li>Tap <b>Create Shortcut key</b> below (on the iPhone, so you can copy the values).</li>
+          <li>Open the <b>Shortcuts</b> app → <b>+</b> → name it <b>Scan receipt</b>.</li>
+          <li>Add action <b>Scan Documents</b>.</li>
+          <li>Add action <b>Get Contents of URL</b>: URL = <i>Upload address</i>; tap ▸ → Method <b>POST</b>;
+            Headers: <code>Authorization</code> = <i>Bearer key</i>; Request Body <b>File</b> → choose <b>Scanned Document</b>.</li>
+          <li>Add <b>Get Dictionary Value</b> → Key <code>message</code> of <i>Contents of URL</i>, then <b>Show Notification</b>.</li>
+          <li>Optional: <b>Get Dictionary Value</b> → Key <code>url</code>, then <b>Open URLs</b> to see the result.</li>
+          <li>Add it to the Home Screen or the Action Button. Done: tap → scan → it's on the Pi.</li>
+        </ol>
+        <p class="small muted">If <i>Scan Documents</i> isn't in your Shortcuts list, scan in <b>Notes</b> or <b>Files</b>,
+          then Share → <b>Scan receipt</b> (enable “Show in Share Sheet”, input: PDFs and Images).</p>
+        <div class="row"><button class="btn primary" type="button" id="sc-create">Create Shortcut key</button></div>
+        <dl class="kv hidden" id="sc-out"></dl>
+        <ul class="list" id="sc-keys"></ul>
+      </div>
+      <div class="card stack">
         <div class="card-head"><h2>Paired devices</h2><span class="section-code">SESSIONS</span></div>
         <ul class="list" id="session-list"></ul>
         <button class="btn" type="button" id="pair-another">Pair another phone</button>

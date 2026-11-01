@@ -87,6 +87,44 @@ def revoke(session_id: str) -> None:
     db.audit(None, "session_revoked", new={"session": session_id[:8]})
 
 
+# ------------------------------------------------------------------ upload-only API keys
+# Used by the iPhone Shortcut (Apple's document scanner -> POST to the Pi). A key
+# can only upload receipts; it cannot read, list or download anything.
+
+KEY_PREFIX = "rsk_"
+
+
+def create_api_key(name: str) -> str:
+    token = KEY_PREFIX + secrets.token_urlsafe(24)
+    db.run("INSERT INTO api_keys(name, key_hash, created_at) VALUES (?,?,?)",
+           (name or "iPhone Shortcut").strip()[:60], _h(token), time.time())
+    db.audit(None, "api_key_created", new={"name": name})
+    return token
+
+
+def api_key_from_header(header: str | None, scope: str = "upload") -> dict | None:
+    if not header or not header.lower().startswith("bearer "):
+        return None
+    token = header.split(" ", 1)[1].strip()
+    if not token.startswith(KEY_PREFIX):
+        return None
+    row = db.one("SELECT * FROM api_keys WHERE key_hash=? AND revoked=0", _h(token))
+    if not row or row["scope"] != scope:
+        return None
+    db.run("UPDATE api_keys SET last_used=?, uses=uses+1 WHERE id=?", time.time(), row["id"])
+    return dict(row)
+
+
+def list_api_keys() -> list[dict]:
+    return [dict(r) for r in db.all_("SELECT id, name, scope, created_at, last_used, uses FROM api_keys "
+                                     "WHERE revoked=0 ORDER BY id")]
+
+
+def revoke_api_key(key_id: int) -> None:
+    db.run("UPDATE api_keys SET revoked=1 WHERE id=?", key_id)
+    db.audit(None, "api_key_revoked", new={"id": key_id})
+
+
 # ------------------------------------------------------------------ CSRF
 
 

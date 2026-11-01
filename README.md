@@ -103,6 +103,19 @@ You can see and revoke paired phones under **Settings → Paired phones**.
 
 **Importing scans.** **Import** on the phone, or **Upload photos** on a computer, accepts photos and PDFs. On an iPhone you can scan with the built-in document scanner (Notes or Files → *Scan Documents*), which draws a box around the receipt and flattens it; save the scan as a PDF, then import it here.
 
+### iPhone: use Apple's own document scanner (one-tap Shortcut)
+
+A web page cannot open the iPhone's document scanner, but the **Shortcuts** app can. Its *Scan Documents* action uses the same scanner as Notes and Files: it draws a box around the receipt, captures automatically and flattens the image. The scan is then uploaded straight to the Pi.
+
+1. On the iPhone, open the app → **Settings → iPhone document scanner → Create Shortcut key**. Copy the *Upload address* and the *Bearer key*. The key can only upload receipts and can be revoked in the same place.
+2. In **Shortcuts**, create **Scan receipt** with these actions:
+   1. **Scan Documents**
+   2. **Get Contents of URL**: the URL is the upload address; Method **POST**; header `Authorization` set to `Bearer rsk_…`; Request Body **File**, set to the scanned document
+   3. **Get Dictionary Value** `message`, then **Show Notification**. Optionally, **Get Dictionary Value** `url`, then **Open URLs** to see the parsed receipt.
+3. Put it on the Home Screen or the Action Button. From then on: tap, scan, and it's on the Pi.
+
+The Shortcut uses the phone's trusted certificates, so install the Pi's CA first (section 2). If *Scan Documents* isn't available, scan in Notes or Files instead and **Share → Scan receipt**. For that, turn on *Show in Share Sheet* and accept PDFs and images, and use *Shortcut Input* as the request body.
+
 ## 5. What is extracted and checked
 
 **Extracted fields:**
