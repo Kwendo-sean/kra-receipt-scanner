@@ -242,6 +242,18 @@ def backoff(attempts: int) -> float:
     return min(6 * 3600, 60 * (2 ** max(0, attempts - 1)))
 
 
+def requeue_config_failures() -> int:
+    """Emails that failed only because SMTP wasn't set up go back in the queue
+    (run at worker start, i.e. after the user fixed .env and restarted)."""
+    if smtp_info()["missing"]:
+        return 0
+    with db.conn() as c:
+        cur = c.execute("UPDATE outbox SET status='queued', next_attempt=0, attempts=0, last_error=NULL "
+                        "WHERE status='failed' AND (last_error LIKE 'SMTP not configured%' "
+                        "OR last_error LIKE 'Waiting: SMTP not configured%')")
+        return cur.rowcount
+
+
 def send_due(sender=None, is_online=None, now: float | None = None) -> dict:
     """Send queued emails whose time has come. Returns counts. `sender` and
     `is_online` are injectable for tests."""
@@ -249,8 +261,14 @@ def send_due(sender=None, is_online=None, now: float | None = None) -> dict:
     is_online = is_online or online
     now = now or time.time()
     rows = db.all_("SELECT * FROM outbox WHERE status='queued' AND next_attempt <= ? ORDER BY id", now)
-    stats = {"sent": 0, "failed": 0, "deferred": 0, "offline": False}
+    stats = {"sent": 0, "failed": 0, "deferred": 0, "offline": False, "not_configured": False}
     if not rows:
+        return stats
+    if sender is _smtp_send and smtp_info()["missing"]:
+        # Not a failure of these emails: keep them queued until .env is filled in.
+        stats["not_configured"] = True
+        db.run("UPDATE outbox SET last_error=? WHERE status='queued'",
+               "Waiting: SMTP not configured in .env on the Pi")
         return stats
     if not is_online():
         stats["offline"] = True

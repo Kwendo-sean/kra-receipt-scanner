@@ -231,6 +231,12 @@ def main() -> None:
     db.init_db()
     db.requeue_stale(0)
     emailer.ensure_owner_recipient()
+    n = emailer.requeue_config_failures()
+    if n:
+        log.info("re-queued %d email(s) that failed before SMTP was configured", n)
+    smtp = emailer.smtp_info()
+    log.info("SMTP: %s", "missing " + ", ".join(smtp["missing"]) if smtp["missing"]
+             else f"{smtp['user']} via {smtp['host']}:{smtp['port']}")
 
     def _sig(*_):
         global _stop

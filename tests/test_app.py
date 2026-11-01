@@ -396,3 +396,24 @@ def test_gmail_app_password_spaces_removed(monkeypatch):
     from app import config
     monkeypatch.setenv("RS_SMTP_PASSWORD", "abcd efgh ijkl mnop")
     assert config.Settings().smtp_password == "abcdefghijklmnop"
+
+
+def test_outbox_waits_for_smtp_config_then_recovers(client, tmp_settings, monkeypatch):
+    from app import db, emailer
+    _owner(tmp_settings, monkeypatch)
+    owner = [r for r in emailer.list_recipients() if r["confirmed"]][0]["id"]
+    emailer.queue(owner, "hello", "body", [])
+    # not configured: stays queued (not failed) with an explanatory note
+    st = emailer.send_due()
+    assert st["not_configured"] and emailer.outbox()[0]["status"] == "queued"
+    assert "SMTP not configured" in emailer.outbox()[0]["last_error"]
+    # an old-style permanent failure is re-queued once SMTP is set
+    db.run("UPDATE outbox SET status='failed', last_error=?",
+           "SMTP not configured (set RS_SMTP_USER / RS_SMTP_PASSWORD in .env)")
+    assert emailer.requeue_config_failures() == 0  # still not configured
+    monkeypatch.setattr(tmp_settings, "smtp_user", "owner@example.com")
+    monkeypatch.setattr(tmp_settings, "smtp_password", "abcdefghijklmnop")
+    assert emailer.requeue_config_failures() == 1
+    sent = []
+    st = emailer.send_due(sender=lambda m: sent.append(m), is_online=lambda: True)
+    assert st["sent"] == 1 and emailer.outbox()[0]["status"] == "sent"
