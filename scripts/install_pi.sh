@@ -20,13 +20,17 @@ echo "== system packages"
 sudo apt-get update -qq
 sudo apt-get install -y -qq python3-venv python3-dev openssl fonts-dejavu-core
 
-echo "== python venv"
-python3 -m venv .venv
-.venv/bin/pip install -q --upgrade pip wheel
-.venv/bin/pip install -q -r requirements.txt
+echo "== python venv (downloads ~200 MB the first time; progress is shown below)"
+[ -x .venv/bin/python ] || python3 -m venv .venv
+# Prefer prebuilt aarch64 wheels; the heavy packages must never compile from
+# source on the Pi (that takes an hour+), so fail fast instead.
+PIP=(.venv/bin/pip install --progress-bar on --prefer-binary
+     --only-binary=numpy,opencv-python-headless,onnxruntime,shapely,pyclipper,cryptography)
+.venv/bin/pip install --upgrade pip wheel
+"${PIP[@]}" -r requirements.txt
 # RapidOCR without its declared deps (it would pull opencv-python, the GUI build needing libGL.so.1)
-.venv/bin/pip install -q --no-deps rapidocr==3.9.2
-.venv/bin/pip install -q -r requirements-ocr.txt
+"${PIP[@]}" --no-deps rapidocr==3.9.2
+"${PIP[@]}" -r requirements-ocr.txt
 .venv/bin/pip uninstall -y -q opencv-python 2>/dev/null || true
 .venv/bin/python -c "import cv2, onnxruntime, rapidocr; print('cv2', cv2.__version__, 'ort', onnxruntime.__version__)"
 .venv/bin/python -c "from app.ocr import model_paths; print(model_paths())"
