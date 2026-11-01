@@ -1,0 +1,14 @@
+# Install with:
+#   pip install --no-deps rapidocr==3.9.2
+#   pip install -r requirements-ocr.txt
+# These are RapidOCR's runtime deps, listed explicitly so pip never pulls
+# opencv-python (GUI build, needs libGL.so.1) instead of the headless build.
+onnxruntime>=1.18
+pyclipper>=1.3
+shapely>=2.0
+PyYAML>=6.0
+six>=1.16
+omegaconf>=2.3
+colorlog>=6.8
+tqdm>=4.66
+requests>=2.31

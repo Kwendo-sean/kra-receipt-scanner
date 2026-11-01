@@ -1,0 +1,52 @@
+# --- Secrets: never commit ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.srl
+certs/
+
+# --- Receipt data: never commit (real receipts, images, DBs) ---
+data/
+media/
+outbox/
+reports_out/
+receipt-samples/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+*.jpg
+*.jpeg
+*.png
+*.heic
+*.webp
+*.pdf
+*.xlsx
+*.csv
+*.zip
+# synthetic fixtures are generated at test time, not committed
+tests/fixtures/generated/
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

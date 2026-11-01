@@ -1,0 +1,109 @@
+from datetime import date, time
+from decimal import Decimal
+
+import pytest
+
+import synth
+from app import textparse as tp
+from app.checks import run_checks
+from app.parser import parse_lines, parse_text
+
+
+# ---------------------------------------------------------------- tokens
+
+def test_money_requires_decimals_or_separators():
+    assert tp.amounts("Tel 0722123456 qty 3 PIN P051234567X") == []
+    assert tp.amounts("5,000") == [Decimal("5000")]
+    assert tp.amounts("KES6,858.00") == [Decimal("6858.00")]
+    assert tp.amounts("B-16%  16%  5,000.00  800.00") == [Decimal("5000.00"), Decimal("800.00")]
+    assert tp.amounts("DISCOUNT -50.00") == [Decimal("-50.00")]
+
+
+def test_dates_are_day_first_and_handle_glued_time():
+    assert tp.find_date("Date:21-10-202608:15") == date(2026, 10, 21)
+    assert tp.find_time("Date:21-10-202608:15") == time(8, 15)
+    assert tp.find_date("03/04/2026") == date(2026, 4, 3)  # 3 April, not March 4
+    assert tp.find_date("2026-10-21 10:00") == date(2026, 10, 21)
+    assert tp.find_date("21 Oct 2026") == date(2026, 10, 21)
+    assert tp.find_date("13/13/2026") is None
+    assert tp.find_time("02:30 PM") == time(14, 30)
+
+
+def test_pin_regex_and_glued_labels():
+    assert tp.find_pins("KRAPIN: P000611133Q") == ["P000611133Q"]
+    assert tp.find_pins("KRAPIN:P000611133Q") == ["P000611133Q"]
+    assert tp.find_pins("PIN P051234567X  BUYER A012345678Z") == ["P051234567X", "A012345678Z"]
+    assert tp.find_pins("P05123456X") == []  # too short
+    assert tp.find_pins("X051234567X") == []  # wrong prefix
+
+
+def test_mpesa_code():
+    assert tp.find_mpesa_code("M-PESA REF: SJK7ABC123") == "SJK7ABC123"
+    assert tp.find_mpesa_code("PIN P051234567X") is None
+
+
+# ---------------------------------------------------------------- receipts
+
+def _assert_expected(r, exp):
+    d = r.to_dict()
+    for k, v in exp.items():
+        if k == "n_items":
+            assert len(d["items"]) == v, [i["description"] for i in d["items"]]
+        elif k == "bands":
+            got = {(b["band"], b["rate"]): (b["taxable"], b["vat"]) for b in d["bands"]}
+            assert got == v, d["bands"]
+        else:
+            assert d[k] == v, (k, d[k], v)
+
+
+@pytest.mark.parametrize("fn", synth.ALL, ids=lambda f: f.__name__)
+def test_synthetic_receipts_parse_exactly(fn):
+    s = fn()
+    _assert_expected(parse_text(s.text), s.expect)
+
+
+def test_supermarket_checks_all_pass():
+    r = parse_text(synth.supermarket_16_exempt().text).to_dict()
+    checks = {c["id"]: c for c in run_checks(r)}
+    assert checks["band_vat:B 16.0%"]["ok"] is True
+    assert checks["band_vat:A 0.0%"]["ok"] is True
+    assert checks["bands_total"]["ok"] is True
+    assert checks["vat_sum"]["ok"] is True
+    assert checks["pin_present"]["ok"] and checks["etims_present"]["ok"]
+
+
+def test_kiosk_flags_missing_pin_etims_vat():
+    r = parse_text(synth.kiosk_no_vat().text).to_dict()
+    checks = {c["id"]: c for c in run_checks(r)}
+    assert checks["pin_present"]["ok"] is False
+    assert checks["etims_present"]["ok"] is False
+    assert checks["vat_shown"]["ok"] is False
+
+
+def test_bad_vat_is_flagged_not_fixed():
+    s = synth.supermarket_16_exempt()
+    text = s.text.replace("1,206.90  193.10", "1,206.90  200.00")
+    r = parse_text(text).to_dict()
+    b = [b for b in r["bands"] if b["band"] == "B"][0]
+    assert b["vat"] == 200.00  # stored as printed
+    checks = {c["id"]: c for c in run_checks(r)}
+    assert checks["band_vat:B 16.0%"]["ok"] is False
+
+
+def test_rate_read_from_receipt_not_letter():
+    # letter B but printed 8% -> 8% is used
+    r = parse_lines(["SHOP", "PIN P051234567X", "TOTAL 108.00", "B-8%  8%  100.00  8.00"]).to_dict()
+    assert r["bands"][0]["rate"] == 8.0
+
+
+def test_vatable_plus_vat_lines():
+    r = parse_lines(["CAFE JAVA", "PIN P051234567X", "Date 01/10/2026", "LATTE  580.00",
+                     "TOTAL 580.00", "VATABLE AMT  500.00", "VAT 16%  80.00"]).to_dict()
+    assert r["bands"] == [{"band": None, "rate": 16.0, "taxable": 500.0, "vat": 80.0, "gross": None,
+                           "source": "VATABLE + VAT lines"}]
+
+
+def test_kra_qr_supplies_invoice_number():
+    r = parse_lines(["SHOP", "TOTAL 100.00"],
+                    kra_qr_url="https://itax.kra.go.ke/KRA-Portal/invoiceChk.htm?actionCode=loadPage&invoiceNo=0040123450000011111")
+    assert r.cu_invoice_no == "0040123450000011111"

@@ -1,0 +1,27 @@
+[Unit]
+Description=KRA receipt scanner - worker (OCR, reports, email outbox)
+After=network-online.target treplex-llm.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+EnvironmentFile=-__DIR__/.env
+# 2 OCR threads so llama-server keeps its 4
+Environment=OMP_NUM_THREADS=2
+Environment=OPENBLAS_NUM_THREADS=2
+ExecStart=__DIR__/.venv/bin/python -m app.worker
+Restart=on-failure
+RestartSec=5
+# one OCR job at a time; hard cap so the LLM is never starved of RAM
+MemoryMax=1400M
+Nice=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=__DIR__/data
+
+[Install]
+WantedBy=multi-user.target

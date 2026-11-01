@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Pair your phone</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="{{ 'kiosk' if kiosk }}">
+<main class="pair-page">
+  <div class="pair-card card">
+    <h1>KRA receipt scanner</h1>
+    {% if error %}
+      <p class="error-box">{{ error }}</p>
+    {% endif %}
+    {% if show_qr %}
+      <p>Scan with your phone's camera to pair it as the scanner.</p>
+      <div class="qr-row">
+        {% if wifi %}
+        <figure class="qr-box-wrap">
+          <div class="qr-box"><img src="/api/wifi/qr.svg" alt="Wi-Fi QR code"></div>
+          <figcaption class="small muted">1 · Join the Pi's Wi-Fi</figcaption>
+        </figure>
+        {% endif %}
+        <figure class="qr-box-wrap">
+          <div class="qr-box"><img id="pair-qr" alt="Pairing QR code"></div>
+          <figcaption class="small muted">{{ '2 · ' if wifi }}Open the scanner · <span id="pair-countdown"></span></figcaption>
+        </figure>
+      </div>
+      <p class="small muted">Each code works once and expires after {{ (ttl // 60) }} minutes; a new one appears automatically.</p>
+      <div class="steps small">
+        <p><b>First time on this phone?</b> Camera access needs HTTPS that your phone trusts.
+          Download and install the <a href="/ca.crt">Pi's certificate</a> once (see the README for Android and iPhone steps),
+          then scan the code again.</p>
+      </div>
+      <script src="/static/pair.js" data-ttl="{{ ttl }}" id="pair-script"></script>
+    {% else %}
+      <p>This browser is not paired.</p>
+      <div class="steps">
+        <p>To pair a phone, show a pairing QR code using one of:</p>
+        <ul>
+          <li>the Pi's own screen: open <code>https://localhost:8090/pair-screen</code></li>
+          <li>over SSH: <code>python -m app.pair_cli</code></li>
+          <li>an already paired phone: <b>Settings → Pair another phone</b></li>
+        </ul>
+        <p class="small muted">First time? Install the <a href="/ca.crt">Pi's certificate</a> on this phone (see README).</p>
+      </div>
+    {% endif %}
+  </div>
+</main>
+</body>
+</html>

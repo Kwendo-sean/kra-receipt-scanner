@@ -1,0 +1,65 @@
+{% if standalone %}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ rep.title }}</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="report-page">
+{% endif %}
+<article class="report">
+  <header class="report-head">
+    <h1>{{ rep.title }}</h1>
+    <p class="sub">{{ rep.subtitle }}</p>
+    <p class="meta">Generated {{ rep.generated }} · {{ rep.prose_summary }}</p>
+  </header>
+  {% for s in rep.sections %}
+  <section class="card">
+    <h2>{{ s.heading }}</h2>
+    {% if s.prose %}
+      {% if s.prose_status == 'raw' %}
+        <pre class="ocr">{{ s.prose }}</pre>
+      {% else %}
+        {% for para in s.prose.split('\n\n') %}<p class="prose">{{ para }}</p>{% endfor %}
+        {% if s.prose_status in ('template_rejected', 'template_offline') %}
+          <p class="badge warn">Template text ({{ 'model output failed number check' if s.prose_status == 'template_rejected' else 'model unavailable' }})</p>
+        {% elif s.prose_status in ('llm', 'llm_retry') %}
+          <p class="badge ok">Written by local model · numbers verified</p>
+        {% endif %}
+      {% endif %}
+    {% endif %}
+    {% if s.kv %}
+    <dl class="kv">
+      {% for k, v in s.kv %}<dt>{{ k }}</dt><dd{% if v == 'MISSING' %} class="missing"{% endif %}>{{ v }}</dd>{% endfor %}
+    </dl>
+    {% endif %}
+    {% for t in s.tables %}
+      {% if t.title %}<h3>{{ t.title }}</h3>{% endif %}
+      <div class="table-wrap">
+      <table>
+        <thead><tr>{% for c in t.columns %}<th{% if loop.index0 in t.money_cols %} class="num"{% endif %}>{{ c }}</th>{% endfor %}</tr></thead>
+        <tbody>
+        {% for r in t.rows %}
+          <tr>{% for v in r %}<td class="{{ 'num' if loop.index0 in t.money_cols }}{{ ' bad' if v in ('MISSING', 'No', 'FAIL') }}">{{ v | cell(loop.index0 in t.money_cols) }}</td>{% endfor %}</tr>
+        {% else %}
+          <tr><td colspan="{{ t.columns|length }}" class="empty">No rows</td></tr>
+        {% endfor %}
+        </tbody>
+        {% if t.totals %}
+        <tfoot><tr>{% for v in t.totals %}<td{% if loop.index0 in t.money_cols %} class="num"{% endif %}>{{ v | cell(loop.index0 in t.money_cols) }}</td>{% endfor %}</tr></tfoot>
+        {% endif %}
+      </table>
+      </div>
+    {% endfor %}
+    {% if s.images and image_url %}
+      <div class="report-images">{% for p in s.images %}<img src="{{ image_url(p) }}" alt="Receipt image" loading="lazy">{% endfor %}</div>
+    {% endif %}
+  </section>
+  {% endfor %}
+  <footer class="disclaimer">{{ rep.footer }}</footer>
+</article>
+{% if standalone %}
+</body>
+</html>
+{% endif %}

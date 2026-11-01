@@ -1,0 +1,24 @@
+[Unit]
+Description=KRA receipt scanner - web app (HTTPS :8090)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+EnvironmentFile=-__DIR__/.env
+ExecStart=__DIR__/.venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=3
+# keep the web process light; OCR runs in the worker
+MemoryMax=400M
+Nice=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=__DIR__/data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+# Runtime dependencies (Pi 5 / aarch64, Python 3.13).
+# RapidOCR is installed separately with --no-deps (see requirements-ocr.txt / README).
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+jinja2>=3.1,<4
+python-multipart>=0.0.9
+numpy>=1.26
+opencv-python-headless>=4.10
+pillow>=10.4
+reportlab>=4.2,<5
+openpyxl>=3.1,<4
+httpx>=0.27,<1
+bleach>=6.1,<7
+qrcode>=7.4,<9
+cryptography>=42
