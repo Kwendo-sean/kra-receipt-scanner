@@ -13,8 +13,11 @@ from app import textparse as tp
 
 KEY_TOTAL_STRONG = re.compile(r"\b(GRAND\s*TOTAL|TOTAL\s*(?:AMOUNT|KES|KSH|DUE|PAYABLE)|AMOUNT\s*(?:DUE|PAYABLE))\b", re.I)
 KEY_TOTAL = re.compile(r"(?<![A-Z])TOTAL(?![A-Z])", re.I)
-KEY_NOT_TOTAL = re.compile(r"SUB\s*-?\s*TOTAL|TOTAL\s*(?:TAX|VAT|ITEMS?|QTY|DISCOUNT|SAVINGS?)|TOTAL\s+[A-E]\s*[-=]|TAX\s*TOTAL|VAT\s*TOTAL|NO\.?\s*OF\s*ITEMS", re.I)
-KEY_TOTAL_VAT = re.compile(r"TOTAL\s*(?:TAX|VAT)(?!\s*[A-E]\b)(?!\s*[A-E]\s*[-:])|(?:TAX|VAT)\s*TOTAL|VAT\s*AMOUNT|TOTAL\s*VAT\s*AMOUNT", re.I)
+KEY_NOT_TOTAL = re.compile(r"SUB\s*-?\s*TOTAL|TOTAL\s*(?:TAX|VAT|ITEMS?|QTY|LINES?|DISCOUNT|SAVINGS?)|"
+                           r"TOTAL\s*(?:BEFORE|AFTER)\s*DISC|TOTAL\s+[A-E]\s*[-=]|TAX\s*TOTAL|VAT\s*TOTAL|NO\.?\s*OF\s*ITEMS", re.I)
+KEY_TOTAL_VAT = re.compile(r"TOTAL\s*(?:TAX|VAT)(?!\s*[A-E]\b)(?!\s*[A-E]\s*[-:])|(?:TAX|VAT)\s*TOTAL|VAT\s*AMOUNT|TOTAL\s*VAT\s*AMOUNT"
+                           # a bare "VAT  1,451.72" line in the totals block
+                           r"|^\s*(?:VAT|TAX)\s*:?\s*(?:KES|KSH)?\s*-?\d[\d,]*\.\d{2}\s*$", re.I)
 KEY_ITEMS_END = re.compile(r"SUB\s*-?\s*TOTAL|(?<![A-Z])TOTAL(?![A-Z])|TAXABLE|VATABLE|TAX\s*(?:CODE|SUMMARY|RATE|DETAILS)|VAT\s*(?:SUMMARY|ANALYSIS|RATE|CODE|%)|^\s*RATE\b|AMOUNT\s*DUE", re.I)
 KEY_SKIP_ITEM = re.compile(r"CASH|CHANGE|M-?PESA|CARD|VISA|MASTER|TENDER|BALANCE|PIN\b|TEL|PHONE|DATE|TIME|TILL|CASHIER|RECEIPT|INVOICE|SERIAL|SIGNATURE|THANK|WELCOME|ROUNDING|DISCOUNT", re.I)
 KEY_HEADER_SKIP = re.compile(r"PIN|TEL|PHONE|P\.?O\.?\s*BOX|BOX\s*\d|EMAIL|@|WWW\.|TAX\s*INVOICE|RECEIPT|INVOICE|DATE|TIME|CASHIER|TILL|VAT\s*NO|KRA|^\W*$|ROAD|STREET|\bRD\b|\bST\b|BRANCH|BUILDING|FLOOR|AVENUE|HOUSE|WELCOME", re.I)
@@ -273,6 +276,10 @@ def _infer_band_amounts(rate: Decimal | None, vals: list[Decimal]) -> tuple:
                 return a, b, None, "taxable,vat"
             if a == 0:
                 return b, a, None, "vat,taxable"
+            if a == b:
+                # some tills repeat the amount in the VAT column of a 0% band;
+                # 0% of anything is 0, so that is not a VAT figure
+                return a, Decimal("0"), None, "taxable (0% band; VAT column repeats the amount)"
         if abs(a * r - b) <= tol:
             return a, b, None, "taxable,vat"
         if r and abs(a * r / (1 + r) - b) <= tol:
@@ -410,7 +417,7 @@ def _mark_cut_amounts(lines: list[str]) -> tuple[list[str], int]:
 
 
 def parse_lines(lines: list[str], kra_qr_url: str | None = None) -> ParsedReceipt:
-    lines = [ln for ln in (l.strip() for l in lines) if ln]
+    lines = [tp.unglue_amounts(ln) for ln in (l.strip() for l in lines) if ln]
     lines, cut = _mark_cut_amounts(lines)
     r = ParsedReceipt()
     if cut:

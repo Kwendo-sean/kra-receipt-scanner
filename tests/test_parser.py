@@ -153,3 +153,14 @@ def test_total_filled_only_when_items_confirm():
     s = synth.supermarket_16_exempt()
     r = _derived(s.text.replace("TOTAL  1,600.00", "TOTAL"))
     assert r["total"] == 1600.0 and r["derived"][0]["field"] == "total"
+
+
+def test_mangled_year_is_left_unread_not_guessed():
+    from app.textparse import find_date
+    # real receipt: "2026" came out as "20:!6" - must not become 2020 (or 2016)
+    assert find_date("DATETIME:07 Jun 20:!6 14:55:52") is None
+    assert find_date("DATETIME : 07 Jun 20!6 14:55:52") is None
+    assert find_date("07 Jun 20:16 14:55") is None
+    # the one safe repair: letter O for zero
+    assert str(find_date("07 Jun 2O26 14:55")) == "2026-06-07"
+    assert str(find_date("07 Jun 26")) == "2026-06-07"

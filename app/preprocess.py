@@ -183,13 +183,191 @@ def white_background(gray: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
     return out
 
 
+def _best_shift(a: np.ndarray, b: np.ndarray, centre: int, r: int) -> tuple[int, float]:
+    """Shift s in centre±r maximising corr(a[y], b[y+s]) (1-D row-ink profiles)."""
+    n = len(a)
+    best, bs = -2.0, centre
+    for s in range(centre - r, centre + r + 1):
+        lo, hi = max(0, -s), min(n, n - s)
+        if hi - lo < n * 0.6:
+            continue
+        x, y = a[lo:hi], b[lo + s:hi + s]
+        x, y = x - x.mean(), y - y.mean()
+        den = float(np.sqrt((x * x).sum() * (y * y).sum()))
+        if den <= 1e-6:
+            continue
+        c = float((x * y).sum()) / den
+        if c > best:
+            best, bs = c, s
+    return bs, best
+
+
+def straighten_rows(gray: np.ndarray, strips: int = 6, win: int = 360, step: int = 120) -> tuple[np.ndarray, dict]:
+    """Wavy / curled paper: down the page, the right-hand amounts drift up or down
+    against their labels until OCR pairs a label with the next line's amount.
+    Measure, in overlapping windows, how far each vertical strip's text lines sit
+    from the middle strip's, follow that drift smoothly down the page (so a drift
+    of nearly a whole line is not mistaken for the next line), and remap the image
+    so every printed line is level again."""
+    h, w = gray.shape[:2]
+    info: dict = {"straighten": None}
+    if h < win + step or w < 300:
+        return gray, info
+    ink = (gray < 150).astype(np.float32)
+    sw = w // strips
+    prof = [cv2.GaussianBlur(ink[:, k * sw:(k + 1) * sw].sum(axis=1).reshape(-1, 1), (1, 0), 2.5).ravel()
+            for k in range(strips)]
+    c = strips // 2
+    centres = list(range(win // 2, h - win // 2, step))
+    rel = np.zeros((len(centres), strips))          # shift of strip k vs strip k-1 (k > c) or k+1 (k < c)
+    prev = np.zeros(strips, int)
+    found = 0
+    for i, yc in enumerate(centres):
+        y0, y1 = yc - win // 2, yc + win // 2
+        for k in list(range(c + 1, strips)) + list(range(c - 1, -1, -1)):
+            ref = k - 1 if k > c else k + 1
+            a, b = prof[ref][y0:y1], prof[k][y0:y1]
+            if a.std() < 0.5 or b.std() < 0.5:        # no print here: keep following the last drift
+                rel[i, k] = prev[k]
+                continue
+            r = 14 if i == 0 or not found else 6
+            s, score = _best_shift(a, b, int(prev[k]), r)
+            if score < 0.35:
+                s = prev[k]
+            else:
+                found += 1
+            rel[i, k] = prev[k] = s
+    # smooth along the page, then accumulate outwards from the middle strip
+    for k in range(strips):
+        rel[:, k] = cv2.GaussianBlur(rel[:, k].reshape(-1, 1).astype(np.float32), (1, 0), 1.5).ravel()
+    tot = np.zeros_like(rel)
+    for k in range(c + 1, strips):
+        tot[:, k] = tot[:, k - 1] + rel[:, k]
+    for k in range(c - 1, -1, -1):
+        tot[:, k] = tot[:, k + 1] + rel[:, k]
+    span = float(np.abs(tot).max())
+    if span < 2.0:
+        info["straighten"] = {"max_shift": round(span, 1)}
+        return gray, info
+    # displacement field: rows by interpolation between window centres, columns between strip centres
+    ys = np.arange(h, dtype=np.float32)
+    xs_c = (np.arange(strips) + 0.5) * sw
+    per_strip = np.stack([np.interp(ys, centres, tot[:, k]) for k in range(strips)], axis=1)   # h x strips
+    xs = np.arange(w, dtype=np.float32)
+    disp = np.empty((h, w), np.float32)
+    for y in range(0, h, 8):                        # coarse rows, then upsample
+        disp[y] = np.interp(xs, xs_c, per_strip[y])
+    rows = np.arange(0, h, 8)
+    disp = cv2.resize(disp[rows], (w, h), interpolation=cv2.INTER_LINEAR)
+    map_x = np.tile(xs, (h, 1))
+    map_y = (ys[:, None] + disp).astype(np.float32)
+    out = cv2.remap(gray, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+    info["straighten"] = {"max_shift": round(span, 1)}
+    return out, info
+
+
+SECTION_W = 1200  # paper width every long-receipt section is scaled to
+
+
+def _edge_line(ys: np.ndarray, xs: np.ndarray) -> tuple[float, float] | None:
+    """Robust x = a*y + b through one side of the paper (drops bumps from hands/tears)."""
+    if len(ys) < 20:
+        return None
+    keep = np.ones(len(ys), bool)
+    for _ in range(3):
+        a, b = np.polyfit(ys[keep], xs[keep], 1)
+        r = np.abs(xs - (a * ys + b))
+        thr = max(2.0, 2.5 * float(np.median(r[keep])))
+        keep = r <= thr
+        if keep.sum() < 20:
+            return None
+    return float(a), float(b)
+
+
+def find_paper_strip(gray: np.ndarray) -> dict | None:
+    """A section of a long receipt: the paper is a bright strip crossing the
+    photo (usually running off the top and/or bottom). Finds its two long
+    edges as straight lines. Returns {angle, x0, x1, y0, y1} in full-res
+    pixels of the image *after* rotating by `angle`, or None."""
+    small = limit_side(gray, 800)
+    f = gray.shape[0] / small.shape[0]
+    blur = cv2.GaussianBlur(small, (0, 0), 2.0)
+    _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(th, connectivity=4)
+    if n < 2:
+        return None
+    k = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    m = lab == k
+    sh, sw = m.shape
+    if m.mean() < 0.06 or m.mean() > 0.9:
+        return None
+    cols = np.arange(sw)
+    rows = np.where(m.any(axis=1))[0]
+    lx = np.array([cols[m[y]].min() for y in rows], float)
+    rx = np.array([cols[m[y]].max() for y in rows], float)
+    wid = rx - lx
+    ok = wid > 0.6 * np.median(wid)
+    # edges touching the photo border are not paper edges
+    okl, okr = ok & (lx > 1), ok & (rx < sw - 2)
+    L, R = _edge_line(rows[okl].astype(float), lx[okl]), _edge_line(rows[okr].astype(float), rx[okr])
+    if L is None or R is None:
+        return None
+    slope = (L[0] + R[0]) / 2
+    if abs(np.degrees(np.arctan(slope))) > 20:
+        return None
+    angle = float(np.degrees(np.arctan(slope)))
+    # paper edges after rotating the image by `angle` (same centre/size rule as rotate())
+    M = cv2.getRotationMatrix2D((sw / 2, sh / 2), -angle, 1.0)
+    cos, sin = abs(M[0, 0]), abs(M[0, 1])
+    nw, nh = int(sh * sin + sw * cos), int(sh * cos + sw * sin)
+    M[0, 2] += nw / 2 - sw / 2
+    M[1, 2] += nh / 2 - sh / 2
+    mr = cv2.warpAffine(m.astype(np.uint8) * 255, M, (nw, nh), flags=cv2.INTER_NEAREST)
+    cov = (mr > 0).sum(axis=0)
+    xs = np.where(cov > 0.5 * cov.max())[0]
+    if len(xs) < 10:
+        return None
+    x0, x1 = xs.min(), xs.max() + 1
+    inside = (mr[:, x0:x1] > 0).mean(axis=1)
+    ys = np.where(inside > 0.6)[0]
+    if len(ys) < 10:
+        return None
+    return {"angle": angle, "x0": int(x0 * f), "x1": int(x1 * f), "y0": int(ys.min() * f), "y1": int((ys.max() + 1) * f)}
+
+
+def prepare_section(img: np.ndarray) -> tuple[np.ndarray, dict]:
+    """One section of a long receipt -> upright paper strip at SECTION_W wide.
+    Every section ends up at the same scale and orientation, so neighbouring
+    sections differ only by a vertical slide (what the stitcher expects)."""
+    info: dict = {"in_size": list(img.shape[:2])}
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    strip = find_paper_strip(gray)
+    if strip is None:
+        info["section"] = "no paper strip"
+        return gray, info
+    # rotate() turns by -angle for a positive slope; keep the same sign convention
+    g = rotate(gray, -strip["angle"])
+    g = g[strip["y0"]:strip["y1"], strip["x0"]:strip["x1"]]
+    if g.shape[1] < 50 or g.shape[0] < 50:
+        info["section"] = "strip too small"
+        return gray, info
+    g = cv2.resize(g, (SECTION_W, int(round(g.shape[0] * SECTION_W / g.shape[1]))),
+                   interpolation=cv2.INTER_AREA if g.shape[1] > SECTION_W else cv2.INTER_CUBIC)
+    info["section"] = {"angle": round(strip["angle"], 2), "paper_w": strip["x1"] - strip["x0"]}
+    info["cropped"] = "paper strip"
+    return g, info
+
+
 def prepare(img: np.ndarray, max_side: int = 1600, crop: bool = True,
-            quad: list | None = None) -> tuple[np.ndarray, dict]:
+            quad: list | None = None, section: bool = False) -> tuple[np.ndarray, dict]:
     """Full pipeline -> grayscale image ready for OCR, plus a debug info dict.
     `quad`: corners confirmed on the phone (fractions of the photo) - used for the
     perspective flatten instead of detecting the paper again."""
     info: dict = {"in_size": list(img.shape[:2])}
-    if quad:
+    if section and not quad:
+        img, info = prepare_section(img)
+    elif quad:
         h, w = img.shape[:2]
         pts = np.array([[x * w, y * h] for x, y in quad], np.float32)
         img = perspective_crop(img, _order(pts))
@@ -208,6 +386,8 @@ def prepare(img: np.ndarray, max_side: int = 1600, crop: bool = True,
     info["white_bg"] = mask is not None
     gray = white_background(even_lighting(gray), mask)
     del mask
+    gray, sinfo = straighten_rows(gray)
+    info.update(sinfo)
     # Receipts are narrow: cap the width (keeps text size sane) rather than the
     # long side, so a 2 m roll is not shrunk to illegibility.
     gray = limit_width(gray, max_side) if gray.shape[0] > 2 * gray.shape[1] else limit_side(gray, max_side)

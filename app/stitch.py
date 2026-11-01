@@ -203,6 +203,154 @@ def dedupe_overlap(prev: list[dict], nxt: list[dict], prev_h: float, next_h: flo
     return sp, sn + k
 
 
+# ------------------------------------------------------------ align by text
+# Photos of crumpled thermal paper don't line up pixel for pixel (every fold
+# stretches differently), but the printed text is the same in both sections.
+# Lines read in both photos vote for the mapping y_prev = s * y_next + d.
+
+
+def _pairs(prev: list[dict], nxt: list[dict]) -> list[tuple[float, float, float]]:
+    """(y_prev, y_next, weight) for lines that read the same in both sections.
+    Longer texts are more distinctive and weigh more."""
+    out = []
+    digits = lambda t: "".join(ch for ch in t if ch.isdigit())
+    na = [(_norm(l["text"]), (l["y0"] + l["y1"]) / 2) for l in prev]
+    nb = [(_norm(l["text"]), (l["y0"] + l["y1"]) / 2) for l in nxt]
+    for ta, ya in na:
+        if len(ta) < 5:
+            continue
+        da = digits(ta)
+        for tb, yb in nb:
+            if len(tb) < 5 or abs(len(ta) - len(tb)) > 0.3 * max(len(ta), len(tb)):
+                continue
+            if ta != tb:
+                sm = SequenceMatcher(None, ta, tb, autojunk=False)
+                if not (sm.real_quick_ratio() >= 0.8 and sm.quick_ratio() >= 0.8 and sm.ratio() >= 0.8):
+                    continue
+                # numbers carry the identity ("ITEM #01" vs "ITEM #16", "1 x 120.00" vs
+                # "1 x 190.00"): letters may differ by an OCR slip, digits hardly at all
+                db = digits(tb)
+                if da != db and (not da or not db or len(da) < 6
+                                 or SequenceMatcher(None, da, db, autojunk=False).ratio() < 0.9):
+                    continue
+            out.append((ya, yb, min(len(ta), len(tb))))
+    return out
+
+
+def align_by_text(prev: list[dict], nxt: list[dict]) -> dict | None:
+    """Robust (RANSAC) fit of y_prev = s * y_next + d over matching lines.
+    Needs 3+ agreeing lines; returns {s, d, inliers, score} or None."""
+    pairs = _pairs(prev, nxt)
+    if len(pairs) < 3:
+        return None
+    hs = [l["y1"] - l["y0"] for l in prev + nxt if l["y1"] > l["y0"]]
+    tol = 0.6 * float(np.median(hs)) if hs else 10.0
+    P = np.array(pairs, float)
+    best = None
+    rng = np.random.default_rng(0)
+    cands = [(i, j) for i in range(len(P)) for j in range(i + 1, len(P))]
+    if len(cands) > 4000:
+        cands = [cands[k] for k in rng.choice(len(cands), 4000, replace=False)]
+    cands += [(i, i) for i in range(len(P))]          # pure shift (s = 1) from one pair
+    for i, j in cands:
+        if i == j:
+            s = 1.0
+        else:
+            dyb = P[j, 1] - P[i, 1]
+            if abs(dyb) < 3 * tol:
+                continue
+            s = (P[j, 0] - P[i, 0]) / dyb
+            if not 0.85 <= s <= 1.18:
+                continue
+        d = P[i, 0] - s * P[i, 1]
+        r = np.abs(P[:, 0] - (s * P[:, 1] + d))
+        inl = r <= tol
+        # one line in `prev` may match several in `nxt` (repeated items): count each once
+        score = float(sum(P[inl, 2]))
+        if best is None or score > best[0]:
+            best = (score, inl)
+    if best is None or best[1].sum() < 3:
+        return None
+    inl = best[1]
+    # refine on the inliers (least squares; plain shift if they span too little)
+    yb, ya = P[inl, 1], P[inl, 0]
+    if np.ptp(yb) > 6 * tol:
+        s, d = np.polyfit(yb, ya, 1)
+        s = float(min(1.18, max(0.85, s)))
+    else:
+        s = 1.0
+    d = float(np.median(ya - s * yb))
+    return {"s": round(s, 4), "d": round(d, 1), "inliers": int(inl.sum()), "score": round(best[0], 1),
+            "tol": round(tol, 1)}
+
+
+def merge_sections(frames_lines: list[list[dict]], heights: list[float]) -> tuple[list[dict], dict]:
+    """Join per-section OCR lines using text alignment. Each overlap is cut in
+    its middle (lines there are complete in both photos), in a gap between
+    lines. Returns (lines in reading order, info). Sections that can't be
+    aligned are joined with the strict line de-dup instead."""
+    info: dict = {"method": "text", "joins": []}
+    out = [dict(l, frame=0) for l in frames_lines[0]]
+    # mapping of section k into section-0 coordinates: y0 = S * y + D
+    S, D = 1.0, 0.0
+    for k in range(1, len(frames_lines)):
+        prev, nxt = frames_lines[k - 1], frames_lines[k]
+        a = align_by_text(prev, nxt)
+        if a is None:
+            tail, head = dedupe_overlap(prev, nxt, heights[k - 1], heights[k])
+            if tail:
+                del out[len(out) - tail:]
+            base = S * heights[k - 1] + D
+            S, D = S, base
+            info["joins"].append({"i": k, "method": "dedupe", "dropped": tail + head})
+            info["method"] = "text+dedupe"
+            out += [dict(l, frame=k, y0=S * l["y0"] + D, y1=S * l["y1"] + D) for l in nxt[head:]]
+            continue
+        s, d = a["s"], a["d"]
+        # overlap in prev coordinates: from where nxt starts to where either ends
+        lo, hi = max(0.0, d), min(heights[k - 1], s * heights[k] + d)
+        if hi <= lo:                                   # fit says they don't overlap
+            cut = heights[k - 1]
+        else:
+            cut = (lo + hi) / 2
+            # snap the cut into the widest gap between prev's lines near the middle
+            ends = sorted(((l["y0"], l["y1"]) for l in prev), key=lambda t: t[0])
+            best_gap, best_c = -1.0, cut
+            for (a0, a1), (b0, _) in zip(ends, ends[1:]):
+                c = (a1 + b0) / 2
+                if lo + 0.25 * (hi - lo) <= c <= hi - 0.25 * (hi - lo) and b0 - a1 > best_gap:
+                    best_gap, best_c = b0 - a1, c
+            cut = best_c
+        # drop prev's lines below the cut (they're in nxt too), and nxt's above it
+        cut0 = S * cut + D
+        out = [l for l in out if l["frame"] != k - 1 or (l["y0"] + l["y1"]) / 2 < cut0]
+        kept = [l for l in nxt if s * (l["y0"] + l["y1"]) / 2 + d >= cut]
+        S, D = S * s, S * d + D
+        out += [dict(l, frame=k, y0=S * l["y0"] + D, y1=S * l["y1"] + D) for l in kept]
+        info["joins"].append(dict(a, i=k, cut=round(cut, 1), dropped=len(nxt) - len(kept)))
+    return out, info
+
+
+def compose(frames: list[np.ndarray], joins: list[dict]) -> np.ndarray | None:
+    """Build the tall 'scan' image from text-aligned sections (cut at the same rows)."""
+    if any(j.get("method") == "dedupe" for j in joins):
+        return None
+    parts, start, sc = [], 0.0, 1.0      # sc: vertical stretch applied to section k
+    w = frames[0].shape[1]
+    for k, f in enumerate(frames):
+        h = f.shape[0]
+        f = cv2.resize(f, (w, max(1, int(round(h * sc)))), interpolation=cv2.INTER_AREA)
+        end = joins[k]["cut"] if k < len(joins) else h
+        a, b = int(round(start * sc)), int(round(end * sc))
+        parts.append(f[a:max(a + 1, b)])
+        if k < len(joins):
+            j = joins[k]
+            # y_prev = s * y_next + d: the cut row, in the next section's own pixels
+            start = max(0.0, (j["cut"] - j["d"]) / j["s"])
+            sc *= j["s"]
+    return np.vstack(parts)
+
+
 def merge_frame_lines(frames_lines: list[list[dict]], heights: list[float]) -> tuple[list[dict], list[int]]:
     """Concatenate per-frame lines, dropping overlap duplicates. Returns (lines, dropped_per_frame)."""
     out: list[dict] = []

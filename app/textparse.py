@@ -20,11 +20,15 @@ _MONEY = re.compile(
 )
 # Allow the currency prefix to be glued on (KES6,858.00)
 _MONEY_GLUED = re.compile(r"(?:KES|KSH|KSHS)(?=\d)", re.IGNORECASE)
+# Two columns read as one: "43,645.696,983.31" -> "43,645.69 6,983.31" (an amount
+# ends at its 2 decimals, so digits right after them start the next amount)
+_AMOUNTS_GLUED = re.compile(r"(\.\d{2})(?=\d{1,3}(?:,\d{3})*\.\d{2}(?!\d))")
 
 
 def money_spans(text: str) -> list[tuple[Decimal, int, int]]:
     """All money amounts in text with their (start, end) spans."""
     t = _MONEY_GLUED.sub(lambda m: m.group(0) + " ", text)
+    t = _AMOUNTS_GLUED.sub(r"\1 ", t)
     out = []
     for m in _MONEY.finditer(t):
         raw = m.group(2).replace(",", "")
@@ -57,9 +61,18 @@ _MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
 
 # numeric, DAY FIRST (Kenyan receipts). Year may be glued to the time: 21-10-202608:15
-_DMY = re.compile(r"(?<!\d)(\d{1,2})\s?[/\-.]\s?(\d{1,2})\s?[/\-.]\s?(\d{4}|\d{2})(?=\d{1,2}:\d{2}|\D|$)")
+# A 2-digit year must stand alone: "20:!6" / "20!6" are a broken 4-digit year.
+_YY = r"\d{2}(?=[\s,.]|$)"
+_DMY = re.compile(r"(?<!\d)(\d{1,2})\s?[/\-.]\s?(\d{1,2})\s?[/\-.]\s?(\d{4}(?=\d{1,2}:\d{2}|\D|$)|" + _YY + ")")
 _YMD = re.compile(r"(?<!\d)(20\d{2})[/\-.](\d{1,2})[/\-.](\d{1,2})(?!\d)")
-_DMONY = re.compile(r"(?<!\d)(\d{1,2})[\s\-/]?([A-Za-z]{3,9})[\s\-/,]*(\d{4}|\d{2})(?!\d)")
+_DMONY = re.compile(r"(?<!\d)(\d{1,2})[\s\-/]?([A-Za-z]{3,9})[\s\-/,]*(\d{4}(?!\d)|" + _YY + ")")
+# Only the unambiguous OCR slip is repaired: the letter O in a year ("2O26").
+# Anything else ("20:!6": was the "!" a 1 or a 2?) is left unread, to be asked.
+_O_YEAR = re.compile(r"(?<![\w])(2[0O][0-9O]{2})(?![\w:])")
+
+
+def _fix_years(text: str) -> str:
+    return _O_YEAR.sub(lambda m: m.group(1).replace("O", "0"), text)
 _TIME = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AaPp][Mm])?(?!\d)")
 
 
@@ -77,6 +90,7 @@ def _mk(y: int, m: int, d: int) -> date | None:
 
 
 def find_date(text: str) -> date | None:
+    text = _fix_years(text)
     for m in _YMD.finditer(text):
         dt = _mk(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         if dt:
@@ -151,3 +165,8 @@ RATE_RE = re.compile(r"(\d{1,2}(?:\.\d{1,2})?)\s?%")
 def find_rate(text: str) -> Decimal | None:
     m = RATE_RE.search(text)
     return Decimal(m.group(1)) if m else None
+
+
+def unglue_amounts(text: str) -> str:
+    """Put back the space OCR dropped between two adjacent amounts."""
+    return _AMOUNTS_GLUED.sub(r"\1 ", text)

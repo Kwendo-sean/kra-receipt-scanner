@@ -3,7 +3,8 @@ import numpy as np
 
 import synth
 from app.lines import Fragment, rebuild_lines
-from app.stitch import merge_frame_lines, offset_orb, offset_template, stitch
+from app.preprocess import find_paper_strip, prepare_section, straighten_rows
+from app.stitch import align_by_text, compose, merge_frame_lines, merge_sections, offset_orb, offset_template, stitch
 
 
 def _gray(img):
@@ -103,3 +104,126 @@ def test_dedupe_keeps_everything_without_overlap():
     f2 = _L(["C 3.00", "D 4.00"])
     lines, dropped = merge_frame_lines([f1, f2], [1000, 1000])
     assert len(lines) == 4 and dropped == [0, 0]
+
+
+# ------------------------------------------------------------ real-photo style sections
+
+def _receipt_lines(n=60):
+    out = []
+    for i in range(n):
+        if i % 7 == 3:
+            out.append("1 x 120.00 A")                      # repeated text (same item price)
+        elif i % 2:
+            out.append(f"20{36000000 + i * 7919:011d}")      # item code
+        else:
+            out.append(f"ITEM {chr(65 + i % 26)}{i} PACK {i * 3}G  {i * 11 + 50}.00")
+    return out
+
+
+def _section(texts, first, last, s=1.0, d=0.0, pitch=40.0, noise=None):
+    """OCR lines of a section showing receipt lines first..last-1; y_section = (40*i - d) / s."""
+    out = []
+    for i in range(first, last):
+        t = texts[i]
+        if noise and i in noise:
+            t = noise[i]
+        y = (pitch * i - d) / s
+        out.append({"text": t, "y0": y, "y1": y + 26 / s})
+    return out
+
+
+def test_text_alignment_finds_shift_and_stretch():
+    texts = _receipt_lines()
+    a = _section(texts, 0, 36)
+    # next photo starts at line 20, 4% stretched, with OCR slips in the overlap
+    b = _section(texts, 20, 60, s=1 / 1.04, d=800, noise={22: "2036I74238", 25: "1TEM Z24 PACK 72G 314.00"})
+    r = align_by_text(a, b)
+    assert r and abs(r["s"] - 1 / 1.04) < 0.01 and abs(r["d"] - 800) < 6 and r["inliers"] >= 8
+
+
+def test_merge_sections_keeps_every_line_once_in_order():
+    texts = _receipt_lines()
+    secs = [_section(texts, 0, 30), _section(texts, 18, 45, s=1.03, d=720), _section(texts, 40, 60, d=1600)]
+    lines, info = merge_sections(secs, [1200, 1200, 1200])
+    assert [l["text"] for l in lines] == texts
+    assert info["method"] == "text" and len(info["joins"]) == 2
+
+
+def test_merge_sections_handles_a_repeated_photo():
+    # the same part photographed twice (r000012 had this) adds nothing
+    texts = _receipt_lines()
+    secs = [_section(texts, 0, 30), _section(texts, 1, 30, d=40), _section(texts, 25, 60, d=1000)]
+    lines, _ = merge_sections(secs, [1200, 1200, 1400])
+    assert [l["text"] for l in lines] == texts
+
+
+def test_merge_sections_falls_back_without_common_text():
+    a = [{"text": f"AAA LINE {i}", "y0": i * 40, "y1": i * 40 + 26} for i in range(20)]
+    b = [{"text": f"BBB ROW {i * 13}", "y0": i * 40, "y1": i * 40 + 26} for i in range(20)]
+    lines, info = merge_sections([a, b], [800, 800])
+    assert len(lines) == 40 and info["joins"][0]["method"] == "dedupe"
+
+
+def test_compose_cuts_sections_at_the_join():
+    # 3 sections of one tall gradient image, aligned by known offsets
+    tall = np.tile(np.arange(3000, dtype=np.float32)[:, None] / 3000 * 255, (1, 300)).astype(np.uint8)
+    secs = [tall[0:1200], tall[900:2100], tall[1800:3000]]
+    joins = [{"s": 1.0, "d": 900.0, "cut": 1050.0}, {"s": 1.0, "d": 900.0, "cut": 1050.0}]
+    out = compose(secs, joins)
+    assert out.shape[0] == 3000 and np.abs(out.astype(int) - tall.astype(int)).max() <= 1
+
+
+def _photo_of_strip(angle):
+    """Dark table, white paper strip running off the top and bottom, tilted, with print."""
+    h, w = 4032 // 4, 3024 // 4
+    img = np.full((h, w, 3), (40, 60, 90), np.uint8)
+    paper = np.full((h * 2, 260), 240, np.uint8)
+    for y in range(20, paper.shape[0] - 20, 24):
+        cv2.putText(paper, "ITEM 1 x 120.00", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, 30, 1)
+    M = cv2.getRotationMatrix2D((130, h), angle, 1.0)
+    M[0, 2] += w / 2 - 130
+    M[1, 2] += h / 2 - h
+    rot = cv2.warpAffine(paper, M, (w, h), borderValue=0)
+    m = cv2.warpAffine(np.full_like(paper, 255), M, (w, h), borderValue=0)
+    img[m > 0] = cv2.cvtColor(rot, cv2.COLOR_GRAY2BGR)[m > 0]
+    return img
+
+
+def test_section_is_cut_to_the_upright_paper_strip():
+    for angle in (-6, 0, 4):
+        img = _photo_of_strip(angle)
+        st = find_paper_strip(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+        assert st and abs(st["angle"] - angle) < 1.0, (angle, st)
+        g, info = prepare_section(img)
+        assert info["cropped"] == "paper strip" and g.shape[1] == 1200
+        # nearly all of the crop is paper (no table down the sides)
+        assert (g > 150).mean() > 0.9
+
+
+def test_straighten_rows_levels_curled_paper():
+    # labels on the left, amounts on the right; down the page the right side
+    # sags until it is ~0.9 of a line lower than its label (r000010's totals)
+    h, w, pitch = 2400, 1200, 50
+    flat = np.full((h, w), 255, np.uint8)
+    rng = np.random.default_rng(3)
+    for y in range(40, h - 60, pitch):
+        x = 30
+        while x < w - 60:
+            ln = int(rng.integers(20, 90))
+            flat[y:y + 22, x:min(w - 30, x + ln)] = 30
+            x += ln + int(rng.integers(15, 60))
+    sag = lambda x, y: 0.9 * pitch * (y / h) * (x / w)
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    curled = cv2.remap(flat, xs, ys - sag(xs, ys), cv2.INTER_LINEAR, borderValue=255)
+
+    def misalign(img):
+        # row offset between the right and left quarters, bottom third of the page
+        a = (img[1600:2300, :300] < 128).sum(axis=1).astype(float)
+        b = (img[1600:2300, -300:] < 128).sum(axis=1).astype(float)
+        best = max(range(-30, 50), key=lambda s: np.dot(a[30:-50], b[30 + s:len(b) - 50 + s]))
+        return abs(best)
+
+    assert misalign(curled) > 25
+    out, info = straighten_rows(curled)
+    assert info["straighten"]["max_shift"] > 10        # measured from the middle strip
+    assert misalign(out) <= 6

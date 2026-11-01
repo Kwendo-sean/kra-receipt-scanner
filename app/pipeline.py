@@ -13,7 +13,7 @@ from app.lines import lines_to_text, rebuild_lines
 from app.ocr import OcrEngine
 from app.parser import parse_and_derive
 from app.preprocess import detect_kra_qr, limit_side, load, prepare
-from app.stitch import merge_frame_lines, stitch
+from app.stitch import compose, merge_sections, stitch
 
 
 def _prep_frames(sources: Iterable, max_side: int,
@@ -22,15 +22,16 @@ def _prep_frames(sources: Iterable, max_side: int,
     before the next one is loaded."""
     grays, infos, qr = [], [], None
     sources = list(sources)
-    # Sections of a long receipt are partial views: a per-frame paper crop would
-    # cut them inconsistently, so only single shots are perspective-cropped.
+    # Single shots get a perspective crop to the whole receipt. Sections of a long
+    # receipt are partial views: each is cut to its paper strip, turned upright and
+    # scaled to one width, so the stitcher only has to find a vertical slide.
     crop = len(sources) == 1
     quads = quads or [None] * len(sources)
     for src, quad in zip(sources, quads):
         img = load(src) if isinstance(src, (str, Path)) else src
         if qr is None:
             qr = detect_kra_qr(limit_side(img, 1600))
-        g, info = prepare(img, max_side=max_side, crop=crop, quad=quad if crop else None)
+        g, info = prepare(img, max_side=max_side, crop=crop, quad=quad if crop else None, section=not crop)
         del img
         grays.append(g)
         infos.append(info)
@@ -74,18 +75,24 @@ def _retry_factory():
     return lambda: OcrEngine(rec=rec)
 
 
-def _read(engine_factory, stitched, grays) -> tuple[list[dict], list | None]:
+def _read(engine_factory, stitched, grays, mode: str = "auto") -> tuple[list[dict], dict | None]:
+    """OCR the stitched image, or each section and join them where the same
+    printed lines appear in both (strict line de-dup only for a join with no
+    common text). Returns (lines, join info)."""
     with engine_factory() as eng:
         if stitched is not None:
             return _ocr_lines(eng, stitched), None
         per = [_ocr_lines(eng, g) for g in grays]
-    return merge_frame_lines(per, [g.shape[0] for g in grays])
+    lines, info = merge_sections(per, [g.shape[0] for g in grays])
+    return lines, info
 
 
 def process_frames_arrays(sources: list, mode: str = "auto", engine_factory: Callable = OcrEngine,
                           progress: Callable[[str], None] | None = None,
                           retry_factory: Callable | None = None, quads: list | None = None) -> dict:
-    """mode: 'auto' (stitch, fall back to de-dup), 'stitch', or 'dedupe'.
+    """mode: 'auto' (long receipts: read each section, join them where the same
+    printed lines appear in both), 'stitch' (image stitch first), or 'dedupe'
+    (same as auto; kept for receipts saved with that setting).
     Hard receipts get a second OCR pass with a more accurate recogniser
     (retry_factory; by default the medium model when the default engine is used)."""
     say = progress or (lambda m: None)
@@ -93,13 +100,17 @@ def process_frames_arrays(sources: list, mode: str = "auto", engine_factory: Cal
     say("preprocessing")
     grays, infos, qr = _prep_frames(sources, max_side, quads)
     stitched, sinfo = (None, {"method": "skipped"})
-    if mode in ("auto", "stitch"):
-        say("stitching" if len(grays) > 1 else "ocr")
+    if len(grays) == 1:
         stitched, sinfo = stitch(grays)
-    say("ocr" if stitched is not None else "ocr per frame")
-    lines, dropped = _read(engine_factory, stitched, grays)
-    if dropped is not None:
-        sinfo = dict(sinfo, fallback="dedupe", dropped_lines=dropped)
+    elif mode == "stitch":
+        say("stitching")
+        stitched, sinfo = stitch(grays)
+    say("ocr" if stitched is not None else "ocr per section")
+    lines, join = _read(engine_factory, stitched, grays, mode)
+    if join is not None:
+        sinfo = dict(sinfo, **join) if sinfo.get("method") == "failed" else dict(join)
+        if join.get("joins") is not None:
+            stitched = compose(grays, join["joins"])
     texts = [l["text"] for l in lines]
     say("parsing")
     parsed = parse_and_derive(texts, kra_qr_url=qr)
@@ -111,7 +122,7 @@ def process_frames_arrays(sources: list, mode: str = "auto", engine_factory: Cal
     if retry_factory is not None and needs_retry(parsed, checks):
         say("re-reading faded print")
         gc.collect()
-        lines2, _ = _read(retry_factory, stitched, grays)
+        lines2, _ = _read(retry_factory, stitched if len(grays) == 1 else None, grays, mode)
         parsed2 = parse_and_derive([l["text"] for l in lines2], kra_qr_url=qr)
         checks2 = run_checks(parsed2)
         passes.append({"engine": "retry", "quality": list(quality(parsed2, checks2))})
