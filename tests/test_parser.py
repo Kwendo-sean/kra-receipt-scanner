@@ -107,3 +107,49 @@ def test_kra_qr_supplies_invoice_number():
     r = parse_lines(["SHOP", "TOTAL 100.00"],
                     kra_qr_url="https://itax.kra.go.ke/KRA-Portal/invoiceChk.htm?actionCode=loadPage&invoiceNo=0040123450000011111")
     assert r.cu_invoice_no == "0040123450000011111"
+
+
+def test_faded_cents_are_not_trusted():
+    s = synth.supermarket_16_exempt()
+    r = parse_text(s.text.replace("TOTAL VAT  193.10", "TOTAL VAT  1,193")).to_dict()
+    assert r["total_vat"] is None                       # unread, not "1193.00"
+    assert any("without cents" in n for n in r["notes"])
+    # receipts that genuinely print whole shillings are unaffected
+    r = parse_lines(["DUKA", "BREAD  1,200", "MILK  2,300", "TOTAL  3,500"]).to_dict()
+    assert r["total"] == 3500.0
+
+
+# ---------------------------------------------------------------- arithmetic gap-filling
+
+def _derived(text):
+    from app.parser import parse_and_derive
+    return parse_and_derive(text.splitlines())
+
+
+def test_faded_band_vat_filled_from_total_and_confirmed_by_rate():
+    s = synth.supermarket_16_exempt()
+    r = _derived(s.text.replace("B-16%  16%  1,206.90  193.10", "B-16%  16%  1,206.90"))
+    b = [b for b in r["bands"] if b["band"] == "B"][0]
+    assert b["vat"] == 193.10 and any("vat" in d["field"].lower() for d in r["derived"])
+    assert run_checks(r) and all(c["ok"] is not False for c in run_checks(r) if c["severity"] == "error")
+
+
+def test_single_band_rebuilt_from_total_and_stated_vat():
+    s = synth.fuel_8()
+    r = _derived(s.text.replace("E-8%  8%  6,351.85  508.15", "E-8%  8%"))
+    assert r["bands"][0]["taxable"] == 6351.85 and r["bands"][0]["vat"] == 508.15
+
+
+def test_no_fill_without_independent_confirmation():
+    # VAT faded AND the printed rate disagrees with what the total implies -> stays missing
+    s = synth.supermarket_16_exempt()
+    text = s.text.replace("B-16%  16%  1,206.90  193.10", "B-16%  16%  1,206.90").replace("TOTAL  1,600.00", "TOTAL  1,650.00")
+    r = _derived(text.replace("TOTAL VAT  193.10", ""))
+    b = [b for b in r["bands"] if b["band"] == "B"][0]
+    assert b["vat"] is None and not r["derived"]
+
+
+def test_total_filled_only_when_items_confirm():
+    s = synth.supermarket_16_exempt()
+    r = _derived(s.text.replace("TOTAL  1,600.00", "TOTAL"))
+    assert r["total"] == 1600.0 and r["derived"][0]["field"] == "total"

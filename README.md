@@ -95,6 +95,14 @@ You can see and revoke paired phones under **Settings → Paired phones**.
 
 **Pre-processing:** the Pi finds the paper edges, crops the perspective, deskews, flattens uneven light with background division and CLAHE (which helps with faded thermal paper), and limits the image width. It also decodes the KRA eTIMS QR code with OpenCV and stores it as evidence. It never fetches the code's URL.
 
+**Faded receipts.** Thermal paper fades, so several steps help without any typing on your side:
+- **White background:** the paper is found by its edge, not its brightness, so shadowed paper is never removed. Everything else becomes white, and that clean scan is what you see in the app.
+- **Automatic second pass:** if a key field is missing or a check fails, the Pi re-reads the receipt with a more accurate model (PP-OCRv6 *medium*, fetched once by `scripts/fetch_models.py`) and keeps the better reading. Normal receipts are never re-read.
+- **Arithmetic gap-filling:** when a faded figure follows exactly from other printed figures and an independent printed figure confirms it, it is filled in and marked *derived*, with the working shown. Otherwise it stays empty and flagged.
+- **Faded cents:** an amount like `6,983` on a receipt that prints cents is treated as unreadable rather than stored as a wrong figure.
+
+**Importing scans.** **Import** on the phone, or **Upload photos** on a computer, accepts photos and PDFs. On an iPhone you can scan with the built-in document scanner (Notes or Files → *Scan Documents*), which draws a box around the receipt and flattens it; save the scan as a PDF, then import it here.
+
 ## 5. What is extracted and checked
 
 **Extracted fields:**

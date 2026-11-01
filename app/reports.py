@@ -303,7 +303,9 @@ def single(params: dict, today: date, use_llm: bool) -> dict:
     imgs = []
     if params.get("include_images", True):
         row = db.one("SELECT stitched_path FROM receipts WHERE id=?", rid)
-        if row and row["stitched_path"]:
+        if receipts.scan_path(rid).is_file():
+            imgs.append(str(receipts.scan_path(rid)))
+        elif row and row["stitched_path"]:
             imgs.append(row["stitched_path"])
         else:
             imgs += [fr["path"] for fr in receipts.frames(rid)]

@@ -236,6 +236,23 @@ async def upload_frame(rid: int, file: UploadFile = File(...), idx: int | None =
     return {"idx": i}
 
 
+@app.post("/api/receipts/import")
+async def import_receipts(files: list[UploadFile] = File(...), one_receipt: bool = Form(False),
+                          sess: dict = Depends(require_session)):
+    """Photos or PDFs (e.g. from the iPhone's built-in document scanner)."""
+    if len(files) > 40:
+        raise HTTPException(400, "Too many files")
+    loaded = []
+    for f in files:
+        data = await f.read(receipts.MAX_IMPORT_BYTES + 1)
+        loaded.append((f.filename or "", data))
+    try:
+        ids = receipts.import_files(loaded, one_receipt)
+    except receipts.ValidationError as e:
+        raise _bad(e)
+    return {"ids": ids}
+
+
 @app.delete("/api/receipts/{rid}/frames/{idx}")
 def delete_frame(rid: int, idx: int, sess: dict = Depends(require_session)):
     receipts.delete_frame(rid, idx)
@@ -340,11 +357,20 @@ def media_stitched(rid: int, w: int | None = None, sess: dict = Depends(require_
     return _send_image(r["stitched_path"] if r else None, w)
 
 
+@app.get("/media/receipts/{rid}/scan.jpg")
+def media_scan(rid: int, w: int | None = None, sess: dict = Depends(require_session)):
+    r = db.one("SELECT id FROM receipts WHERE id=? AND deleted=0", rid)
+    p = receipts.scan_path(rid)
+    return _send_image(str(p) if r and p.is_file() else None, w)
+
+
 def _image_url_for(path: str) -> str:
     p = Path(path)
     rid = int(p.parent.name.lstrip("r"))
     if p.name == "stitched.jpg":
         return f"/media/receipts/{rid}/stitched.jpg?w=900"
+    if p.name == "scan.jpg":
+        return f"/media/receipts/{rid}/scan.jpg?w=900"
     idx = int(p.stem.split("_")[1])
     return f"/media/receipts/{rid}/frame/{idx}.jpg?w=900"
 

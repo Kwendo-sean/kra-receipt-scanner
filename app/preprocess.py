@@ -136,6 +136,53 @@ def even_lighting(gray: np.ndarray) -> np.ndarray:
     return clahe.apply(norm)
 
 
+def paper_mask(gray: np.ndarray) -> np.ndarray | None:
+    """Mask of the receipt paper, found by its *edges* rather than brightness:
+    a table/paper boundary is a sharp step, while uneven light or faded print is
+    smooth after blurring, so shadowed paper is never mistaken for background.
+    Returns None when there is no clear paper boundary (e.g. paper fills frame)."""
+    small = limit_side(gray, 600)
+    sh, sw = small.shape[:2]
+    blur = cv2.GaussianBlur(small, (0, 0), 3.0)          # erase the print itself
+    edges = cv2.Canny(blur, 25, 70)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=2)
+    free = (edges == 0).astype(np.uint8)
+    n, lab = cv2.connectedComponents(free, connectivity=4)
+    if n < 2:
+        return None
+    # the paper is the edge-free region at the centre (receipts are framed centrally)
+    cy, cx = sh // 2, sw // 2
+    win = lab[max(0, cy - 15):cy + 16, max(0, cx - 15):cx + 16].ravel()
+    win = win[win > 0]
+    if win.size == 0:
+        return None
+    paper = int(np.bincount(win).argmax())
+    m = (lab == paper).astype(np.uint8) * 255
+    # fill any holes, then grow back over the dilated edge band
+    cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    m = np.zeros_like(m)
+    cv2.drawContours(m, cnts, -1, 255, thickness=cv2.FILLED)
+    m = cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=2)
+    frac = m.mean() / 255
+    if frac > 0.97 or frac < 0.12:
+        return None
+    # only whiten when the outside really is darker than the paper (a table)
+    inside, outside = small[m > 0], small[m == 0]
+    if outside.size == 0 or float(np.median(inside)) - float(np.median(outside)) < 35:
+        return None
+    m = cv2.erode(m, np.ones((3, 3), np.uint8))  # stay just inside the paper edge
+    return cv2.resize(m, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+
+def white_background(gray: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
+    """Everything that isn't paper becomes pure white (a clean 'scan')."""
+    if mask is None:
+        return gray
+    out = gray.copy()
+    out[mask == 0] = 255
+    return out
+
+
 def prepare(img: np.ndarray, max_side: int = 1600, crop: bool = True) -> tuple[np.ndarray, dict]:
     """Full pipeline -> grayscale image ready for OCR, plus a debug info dict."""
     info: dict = {"in_size": list(img.shape[:2])}
@@ -149,7 +196,10 @@ def prepare(img: np.ndarray, max_side: int = 1600, crop: bool = True) -> tuple[n
     ang = deskew_angle(gray)
     info["deskew_deg"] = round(ang, 2)
     gray = rotate(gray, ang)
-    gray = even_lighting(gray)
+    mask = paper_mask(gray)
+    info["white_bg"] = mask is not None
+    gray = white_background(even_lighting(gray), mask)
+    del mask
     # Receipts are narrow: cap the width (keeps text size sane) rather than the
     # long side, so a 2 m roll is not shrunk to illegibility.
     gray = limit_width(gray, max_side) if gray.shape[0] > 2 * gray.shape[1] else limit_side(gray, max_side)

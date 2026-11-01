@@ -45,6 +45,10 @@ def handle_ocr(payload: dict, engine_factory=None) -> dict:
     if res["stitched"] is not None:
         stitched_path = str(receipts.receipt_dir(rid) / "stitched.jpg")
         cv2.imwrite(stitched_path, res["stitched"], [cv2.IMWRITE_JPEG_QUALITY, 85])
+    scan = res.pop("scan", None)
+    if scan is not None:
+        cv2.imwrite(str(receipts.receipt_dir(rid) / "scan.jpg"), scan, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    del scan
     res.pop("stitched", None)
     db.run("UPDATE receipts SET status='done', stage=NULL, parsed_json=?, ocr_text=?, lines_json=?, stitch_json=?, "
            "prep_json=?, kra_qr=?, stitched_path=?, updated_at=? WHERE id=?",

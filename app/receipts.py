@@ -34,6 +34,11 @@ def receipt_dir(rid: int) -> Path:
     return d
 
 
+def scan_path(rid: int) -> Path:
+    """Clean white-background scan written by the worker after OCR."""
+    return config.settings.media_dir / f"r{rid:06d}" / "scan.jpg"
+
+
 def create(mode: str = "single") -> int:
     now = time.time()
     rid = db.run("INSERT INTO receipts(created_at, updated_at, status, mode) VALUES (?,?,?,?)",
@@ -80,6 +85,69 @@ def add_frame(rid: int, data: bytes, idx: int | None = None, sharpness: float | 
            rid, idx, str(path), time.time(), sharpness, w, h)
     db.audit(rid, "frame_saved", field=f"frame {idx}", actor="phone")
     return idx
+
+
+MAX_IMPORT_BYTES = 40 * 1024 * 1024
+MAX_PDF_PAGES = 20
+
+
+def to_jpegs(data: bytes, filename: str = "") -> list[bytes]:
+    """Turn an uploaded file into JPEG frames: a PDF (e.g. the iPhone's built-in
+    document scanner) becomes one frame per page; PNG/WebP/JPEG are re-encoded."""
+    import cv2
+    import numpy as np
+    if len(data) > MAX_IMPORT_BYTES:
+        raise ValidationError("File too large")
+    if data[:5] == b"%PDF-":
+        import pypdfium2 as pdfium
+        try:
+            pdf = pdfium.PdfDocument(data)
+        except Exception as e:  # noqa: BLE001 - any parse failure is a bad upload
+            raise ValidationError(f"Could not read PDF: {e}")
+        if len(pdf) > MAX_PDF_PAGES:
+            raise ValidationError(f"PDF has more than {MAX_PDF_PAGES} pages")
+        out = []
+        for i in range(len(pdf)):
+            page = pdf[i]
+            w_pt = page.get_width()
+            scale = min(300 / 72, 2400 / max(1.0, w_pt))  # ~300 dpi, at most 2400 px wide
+            img = page.render(scale=scale, grayscale=False).to_numpy()
+            if img.ndim == 3 and img.shape[2] == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            out.append(cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])[1].tobytes())
+            page.close()
+        pdf.close()
+        return out
+    if _is_jpeg(data):
+        return [data]
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValidationError(f"Unsupported file {filename or ''}: send JPEG, PNG or PDF")
+    return [cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])[1].tobytes()]
+
+
+def import_files(files: list[tuple[str, bytes]], one_receipt: bool) -> list[int]:
+    """Create receipt(s) from uploaded files and queue them for OCR. With
+    one_receipt, all files/pages are sections of one long receipt (in order);
+    otherwise each file is its own receipt (a multi-page PDF stays one receipt)."""
+    groups: list[list[bytes]] = []
+    for name, data in files:
+        frames = to_jpegs(data, name)
+        if one_receipt and groups:
+            groups[0].extend(frames)
+        else:
+            groups.append(frames)
+    ids = []
+    for frames in groups:
+        if len(frames) > MAX_FRAMES:
+            raise ValidationError("Too many sections")
+        rid = create("multi" if len(frames) > 1 else "single")
+        for i, f in enumerate(frames):
+            add_frame(rid, f, i)
+        db.audit(rid, "imported", new={"frames": len(frames)})
+        submit(rid)
+        ids.append(rid)
+    return ids
 
 
 def delete_frame(rid: int, idx: int) -> None:
@@ -160,6 +228,7 @@ def get(rid: int, today: date | None = None) -> dict | None:
         "stitch": db.jload(row["stitch_json"], {}),
         "frames": [{"idx": f["idx"], "sharpness": f["sharpness"]} for f in frames(rid)],
         "has_stitched": bool(row["stitched_path"]),
+        "has_scan": scan_path(rid).is_file(),
     }
 
 

@@ -24,6 +24,11 @@
       this.onSample = opts.onSample || (() => {});
       this.onAutoCapture = opts.onAutoCapture || (() => {});
       this.onAlign = opts.onAlign || (() => {});
+      this.onQuad = opts.onQuad || (() => {});
+      this.qcanvas = document.createElement("canvas");
+      this.qctx = this.qcanvas.getContext("2d", { willReadFrequently: true });
+      this.quad = null;
+      this.tick = 0;
       this.ref = null;           // reduced gray of the last long-receipt section
       this.align = null;
       this.lastReduced = null;
@@ -97,6 +102,7 @@
     sample() {
       const g = this.guideRect();
       if (!g || this.video.readyState < 2) return;
+      if (this.tick++ % 2 === 0) this.detectQuad();
       const sw = SAMPLE_W, sh = Math.max(1, Math.round(g.h * sw / g.w));
       this.small.width = sw; this.small.height = sh;
       this.sctx.drawImage(this.video, g.x, g.y, g.w, g.h, 0, 0, sw, sh);
@@ -140,6 +146,33 @@
         this.lastCapture = now;
         this.onAutoCapture();
       }
+    }
+
+    // Live "document box": find the receipt paper in the whole frame and report
+    // its corners in screen pixels (like the iPhone's document scanner outline).
+    detectQuad() {
+      const v = this.video, vw = v.videoWidth, vh = v.videoHeight;
+      if (!vw || !vh) return;
+      const qw = 160, qh = Math.round(vh * qw / vw);
+      this.qcanvas.width = qw; this.qcanvas.height = qh;
+      this.qctx.drawImage(v, 0, 0, qw, qh);
+      const pts = findPaperQuad(this.qctx.getImageData(0, 0, qw, qh).data, qw, qh);
+      if (!pts) {
+        this.quad = null;
+        this.onQuad(null);
+        return;
+      }
+      // smooth corner jitter between samples
+      if (this.quad) for (let i = 0; i < 4; i++) {
+        pts[i][0] = 0.5 * pts[i][0] + 0.5 * this.quad[i][0];
+        pts[i][1] = 0.5 * pts[i][1] + 0.5 * this.quad[i][1];
+      }
+      this.quad = pts;
+      const vr = v.getBoundingClientRect();
+      const scale = Math.max(vr.width / vw, vr.height / vh);
+      const offX = (vr.width - vw * scale) / 2, offY = (vr.height - vh * scale) / 2;
+      const k = vw / qw;
+      this.onQuad(pts.map(([x, y]) => [offX + x * k * scale, offY + y * k * scale]));
     }
 
     // Long receipts: remember the section just captured (reduced gray, for live
@@ -192,6 +225,59 @@
       c.getContext("2d").drawImage(bmp, 0, 0);
       return await new Promise((res) => c.toBlob(res, "image/jpeg", 0.92));
     }
+  }
+
+  // Largest bright region (paper) via Otsu threshold + flood fill, then its
+  // four extreme corners. Returns [[x,y] x4] (tl,tr,br,bl) or null.
+  function findPaperQuad(d, w, h) {
+    const n = w * h, gray = new Uint8Array(n), hist = new Uint32Array(256);
+    for (let i = 0, j = 0; i < n; i++, j += 4) {
+      const g = (d[j] * 77 + d[j + 1] * 150 + d[j + 2] * 29) >> 8;
+      gray[i] = g; hist[g]++;
+    }
+    // Otsu
+    let sum = 0;
+    for (let t = 0; t < 256; t++) sum += t * hist[t];
+    let sumB = 0, wB = 0, best = 0, thr = 128;
+    for (let t = 0; t < 256; t++) {
+      wB += hist[t]; if (!wB) continue;
+      const wF = n - wB; if (!wF) break;
+      sumB += t * hist[t];
+      const mB = sumB / wB, mF = (sum - sumB) / wF, between = wB * wF * (mB - mF) * (mB - mF);
+      if (between > best) { best = between; thr = t; }
+    }
+    const lab = new Int32Array(n), stack = new Int32Array(n);
+    let bestLab = 0, bestArea = 0, cur = 0;
+    for (let s = 0; s < n; s++) {
+      if (lab[s] || gray[s] <= thr) continue;
+      cur++; let sp = 0, area = 0; stack[sp++] = s; lab[s] = cur;
+      while (sp) {
+        const p = stack[--sp]; area++;
+        const x = p % w, y = (p - x) / w;
+        if (x > 0 && !lab[p - 1] && gray[p - 1] > thr) { lab[p - 1] = cur; stack[sp++] = p - 1; }
+        if (x < w - 1 && !lab[p + 1] && gray[p + 1] > thr) { lab[p + 1] = cur; stack[sp++] = p + 1; }
+        if (y > 0 && !lab[p - w] && gray[p - w] > thr) { lab[p - w] = cur; stack[sp++] = p - w; }
+        if (y < h - 1 && !lab[p + w] && gray[p + w] > thr) { lab[p + w] = cur; stack[sp++] = p + w; }
+      }
+      if (area > bestArea) { bestArea = area; bestLab = cur; }
+    }
+    const frac = bestArea / n;
+    if (frac < 0.06 || frac > 0.95) return null;   // no paper, or paper fills the frame
+    let tl = [0, 0, Infinity], tr = [0, 0, -Infinity], br = [0, 0, -Infinity], bl = [0, 0, Infinity];
+    let minX = w, maxX = 0, minY = h, maxY = 0;
+    for (let p = 0; p < n; p++) {
+      if (lab[p] !== bestLab) continue;
+      const x = p % w, y = (p - x) / w, s1 = x + y, s2 = x - y;
+      if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (s1 < tl[2]) tl = [x, y, s1];
+      if (s1 > br[2]) br = [x, y, s1];
+      if (s2 > tr[2]) tr = [x, y, s2];
+      if (s2 < bl[2]) bl = [x, y, s2];
+    }
+    // touching 3+ frame edges = paper fills the view: no outline to draw
+    const edges = (minX === 0) + (maxX === w - 1) + (minY === 0) + (maxY === h - 1);
+    if (edges >= 3) return null;
+    return [[tl[0], tl[1]], [tr[0] + 1, tr[1]], [br[0] + 1, br[1] + 1], [bl[0], bl[1] + 1]];
   }
 
   // 3x box-downsample of the SAMPLE_W gray frame to MATCH_W columns
@@ -252,6 +338,7 @@
   }
 
   Scanner._reduce = reduce;      // exposed for tests
+  Scanner._findPaperQuad = findPaperQuad;
   Scanner._matchRef = matchRef;
   Scanner.STRIP = STRIP;
   Scanner.TARGET = TARGET;

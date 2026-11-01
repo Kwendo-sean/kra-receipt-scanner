@@ -71,6 +71,13 @@ class Settings:
     ocr_threads: int = field(default_factory=lambda: _int("RS_OCR_THREADS", 2))
     ocr_max_side: int = field(default_factory=lambda: _int("RS_OCR_MAX_SIDE", 1600))
     ocr_model_dir: str = field(default_factory=lambda: _env("RS_OCR_MODEL_DIR", ""))
+    # PP-OCRv6 sizes: "small" ships inside the RapidOCR wheel; "medium" is more
+    # accurate on faded thermal paper and is fetched once by scripts/fetch_models.py
+    ocr_det: str = field(default_factory=lambda: _env("RS_OCR_DET", "small"))
+    ocr_rec: str = field(default_factory=lambda: _env("RS_OCR_REC", "small"))
+    # Second, slower pass for hard (faded) receipts only; "" disables it
+    ocr_retry_rec: str = field(default_factory=lambda: _env("RS_OCR_RETRY_REC", "medium"))
+    ocr_extra_dir: str = field(default_factory=lambda: _env("RS_OCR_EXTRA_DIR", str(ROOT / "models")))
 
     # SMTP (password is only read here and in emailer.send)
     smtp_host: str = field(default_factory=lambda: _env("RS_SMTP_HOST", "smtp.gmail.com"))

@@ -50,3 +50,6 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# --- OCR models fetched at install time (not committed) ---
+models/

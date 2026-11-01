@@ -103,6 +103,7 @@
       m.firstElementChild.style.width = Math.min(100, (sharp / (threshold * 2)) * 100) + "%";
       m.classList.toggle("ok", isSharp);
       $("#guide").classList.toggle("sharp", isSharp && stable);
+      $("#doc-box").classList.toggle("ready", isSharp && stable);
       $("#hud-sharp").textContent = (sharp / threshold).toFixed(2);
       $("#hud-steady").textContent = stable ? "LOCKED" : "MOVING";
       $("#hud-dot").classList.toggle("ok", isSharp && stable);
@@ -113,6 +114,14 @@
     },
     onAutoCapture: () => captureNow(),
     onAlign: (a) => showAlign(a),
+    onQuad: (pts) => {
+      const box = $("#doc-box");
+      if (!pts) { box.classList.add("hidden"); return; }
+      const r = $("#video").getBoundingClientRect();
+      box.setAttribute("viewBox", `0 0 ${r.width} ${r.height}`);
+      $("#doc-poly").setAttribute("points", pts.map((p) => p.map((v) => v.toFixed(1)).join(",")).join(" "));
+      box.classList.remove("hidden");
+    },
   });
 
   // Green "continue from here" line: where the previous section ended, tracked live.
@@ -208,6 +217,7 @@
   function updateScanButtons() {
     const multi = scan.mode === "multi";
     $("#btn-undo").classList.toggle("hidden", !multi);
+    $("#btn-import").classList.toggle("hidden", multi && scan.frames.length > 0);
     $("#btn-done").classList.toggle("hidden", !multi);
     $("#btn-undo").disabled = !scan.frames.length;
     $("#btn-done").disabled = !scan.frames.length;
@@ -358,8 +368,22 @@
 
   function receiptBody(r) {
     const root = el("div", { class: "stack" });
-    const imgSrc = r.has_stitched ? `/media/receipts/${r.id}/stitched.jpg` : (r.frames.length ? `/media/receipts/${r.id}/frame/${r.frames[0].idx}.jpg` : null);
-    if (imgSrc) root.append(el("img", { class: "detail-img", src: imgSrc + "?w=900", alt: "Receipt photo", onclick: () => zoom(imgSrc) }));
+    const photoSrc = r.has_stitched ? `/media/receipts/${r.id}/stitched.jpg` : (r.frames.length ? `/media/receipts/${r.id}/frame/${r.frames[0].idx}.jpg` : null);
+    const scanSrc = r.has_scan ? `/media/receipts/${r.id}/scan.jpg` : null;
+    let imgSrc = scanSrc || photoSrc;
+    if (imgSrc) {
+      const img = el("img", { class: "detail-img", src: imgSrc + "?w=900", alt: "Receipt", onclick: () => zoom(imgSrc) });
+      root.append(img);
+      if (scanSrc && photoSrc) {
+        const tog = el("button", { type: "button", class: "btn small" }, "Show original photo");
+        tog.addEventListener("click", () => {
+          imgSrc = imgSrc === scanSrc ? photoSrc : scanSrc;
+          img.src = imgSrc + "?w=900";
+          tog.textContent = imgSrc === scanSrc ? "Show original photo" : "Show clean scan";
+        });
+        root.append(el("div", { class: "row" }, el("span", { class: "eyebrow grow", text: "Clean scan · white background" }), tog));
+      }
+    }
     if (r.frames.length > 1) root.append(el("div", { class: "row small" }, "Sections:",
       r.frames.map((f) => el("button", { type: "button", class: "btn small", onclick: () => zoom(`/media/receipts/${r.id}/frame/${f.idx}.jpg`) }, String(f.idx + 1)))));
     if (r.status !== "done") {
@@ -380,6 +404,17 @@
       el("ul", { class: "list checks" }, r.checks.map((c) => el("li", {},
         el("span", { class: "icon " + (c.ok === true ? "ok" : c.ok === false ? "bad" : "na"), text: c.ok === true ? "✓" : c.ok === false ? "✗" : "–" }),
         el("div", { class: "main" }, el("div", { text: c.label }), el("div", { class: "small muted", text: c.detail })))))));
+
+    // figures recovered from the receipt's own arithmetic (shown, never hidden)
+    const derived = (r.parsed && r.parsed.derived) || [];
+    if (derived.length) root.append(el("div", { class: "card" },
+      el("div", { class: "card-head" }, el("h2", { text: "Recovered from the receipt's arithmetic" }), el("span", { class: "section-code", text: "DERIVED" })),
+      el("ul", { class: "list checks" }, derived.map((d) => el("li", {},
+        el("span", { class: "icon ok", text: "=" }),
+        el("div", { class: "main" }, el("div", { text: `${d.field}: ${kes(d.value)}` }), el("div", { class: "small muted", text: d.how })))))));
+    const passes = (r.stitch && r.stitch.ocr_passes) || [];
+    if (passes.length > 1) root.append(el("p", { class: "small muted",
+      text: "Faded print: read twice automatically" + (passes.some((p) => p.chosen) ? " (the second, more accurate reading was used)." : " (first reading kept).") }));
 
     // editable fields
     const f = r.fields, corr = r.corrections || {};
@@ -537,25 +572,14 @@
       : el("tr", {}, el("td", { colspan: 9, class: "empty", text: "No receipts yet. Scan with your phone, or upload photos." }))));
   }
 
-  // ---------------------------------------------------------------- desktop upload (no camera)
-  async function toJpeg(file) {
-    if (file.type === "image/jpeg") return file;
-    const bmp = await createImageBitmap(file);
-    const c = document.createElement("canvas");
-    c.width = bmp.width; c.height = bmp.height;
-    c.getContext("2d").drawImage(bmp, 0, 0);
-    return await new Promise((res) => c.toBlob(res, "image/jpeg", 0.92));
-  }
-  async function uploadReceipt(files, mode) {
-    const rid = (await api("POST", "/api/receipts", { mode })).id;
-    for (let i = 0; i < files.length; i++) {
-      const fd = new FormData();
-      fd.append("file", await toJpeg(files[i]), `frame${i}.jpg`);
-      fd.append("idx", String(i));
-      await api("POST", `/api/receipts/${rid}/frames`, fd, true);
-    }
-    await api("POST", `/api/receipts/${rid}/submit`, { ocr_mode: "auto" });
-    return rid;
+  // ---------------------------------------------------------------- import photos / PDFs
+  // PDFs come from e.g. the iPhone's built-in document scanner (Files or Notes ->
+  // Scan Documents), which finds the receipt edges and flattens it on the phone.
+  async function importFiles(files, oneReceipt) {
+    const fd = new FormData();
+    files.forEach((f) => fd.append("files", f, f.name || "upload"));
+    fd.append("one_receipt", oneReceipt ? "true" : "false");
+    return (await api("POST", "/api/receipts/import", fd, true)).ids;
   }
   $("#upload-input").addEventListener("change", async (e) => {
     const files = Array.from(e.target.files || []).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
@@ -563,13 +587,24 @@
     if (!files.length) return;
     const long = $("#upload-long").checked;
     try {
-      toast(`Uploading ${files.length} photo(s)…`, 60000);
-      if (long) await uploadReceipt(files, files.length > 1 ? "multi" : "single");
-      else for (const f of files) await uploadReceipt([f], "single");
-      toast(long ? "Uploaded as one receipt: reading now" : `${files.length} receipt(s) queued for reading`);
+      toast(`Uploading ${files.length} file(s)…`, 60000);
+      const ids = await importFiles(files, long);
+      toast(`${ids.length} receipt(s) queued for reading`);
       loadReceipts();
       setTimeout(loadReceipts, 8000);
     } catch (err) { toast("Upload failed: " + err.message, 5000); }
+  });
+  $("#import-input").addEventListener("change", async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+    try {
+      toast("Importing…", 60000);
+      const ids = await importFiles(files, scan.mode === "multi");
+      ids.forEach((id) => watching.add(id));
+      toast(`${ids.length} receipt(s) queued for reading`);
+      pollQueue();
+    } catch (err) { toast("Import failed: " + err.message, 5000); }
   });
 
   // ================================================================ OVERVIEW (desktop)

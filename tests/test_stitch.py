@@ -27,6 +27,12 @@ def test_rebuild_lines_tolerates_skew_and_slight_box_overlap():
     assert len(lines) == 2
 
 
+def test_rebuild_lines_merges_double_detected_word():
+    # the detector boxed "3" twice: once at the end of the name, once with the price
+    frags = [Fragment("THERMOMETER #15 3", 30, 890, 330, 919), Fragment("3 x 45.00 135.00 B", 312, 890, 640, 919)]
+    assert [ln.text for ln in rebuild_lines(frags)] == ["THERMOMETER #15 3 x 45.00 135.00 B"]
+
+
 def _long_frames(n=4):
     s = synth.long_multi(40)
     img = _gray(synth.render(s))

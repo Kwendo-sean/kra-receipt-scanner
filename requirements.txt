@@ -13,3 +13,4 @@ httpx>=0.27,<1
 bleach>=6.1,<7
 qrcode>=7.4,<9
 cryptography>=42
+pypdfium2>=4.30,<6

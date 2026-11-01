@@ -79,6 +79,7 @@ class ParsedReceipt:
     payment_method: str | None = None
     mpesa_code: str | None = None
     notes: list[str] = field(default_factory=list)
+    derived: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -205,7 +206,10 @@ def _items_region(lines: list[str]) -> tuple[int, int]:
     and the first totals/tax-summary line."""
     end = len(lines)
     for i, ln in enumerate(lines):
-        if KEY_ITEMS_END.search(ln) and tp.amounts(ln) or re.search(r"SUB\s*-?\s*TOTAL", ln, re.I):
+        if ITEM_QTY.match(ln.strip()):
+            continue
+        # a totals/tax line ends the items even if its amount faded away
+        if KEY_ITEMS_END.search(ln) or (BAND_TAG.search(ln) and tp.find_rate(ln) is not None):
             end = i
             break
     start = 0
@@ -322,6 +326,10 @@ def _bands(lines: list[str], items_end: int) -> tuple[list[Band], list[str]]:
         txt = tp.RATE_RE.sub(" ", ln)
         vals = tp.amounts(txt)
         if not vals:
+            # band tag + printed rate but the amounts faded: keep the band so the
+            # receipt's arithmetic can still recover it (derive.py)
+            if mt and (letter, float(rate)) not in bands:
+                bands[(letter, float(rate))] = Band(letter, float(rate), None, None, None, "amounts unreadable")
             continue
         if KEY_TOTAL_STRONG.search(ln) and not mt:
             continue
@@ -379,9 +387,34 @@ def _bands(lines: list[str], items_end: int) -> tuple[list[Band], list[str]]:
     return list(bands.values()), notes
 
 
+_NO_CENTS = re.compile(r"(?<![\d.,])(\d{1,3}(?:,\d{3})+)(?![\d.,])")
+
+
+def _mark_cut_amounts(lines: list[str]) -> tuple[list[str], int]:
+    """On a receipt that prints cents, '6,983' is almost certainly '6,983.31' with
+    faded cents. Make such tokens unreadable (field stays missing and is flagged)
+    instead of storing a wrong figure."""
+    spans = [m for ln in lines for m in tp._MONEY.finditer(tp._MONEY_GLUED.sub(lambda x: x.group(0) + " ", ln))]
+    if len(spans) < 3:
+        return lines, 0
+    with_cents = sum(1 for m in spans if "." in m.group(2))
+    if with_cents / len(spans) < 0.8:
+        return lines, 0
+    n = 0
+    out = []
+    for ln in lines:
+        new, k = _NO_CENTS.subn(lambda m: m.group(1).replace(",", " ") + "?", ln)
+        n += k
+        out.append(new)
+    return out, n
+
+
 def parse_lines(lines: list[str], kra_qr_url: str | None = None) -> ParsedReceipt:
     lines = [ln for ln in (l.strip() for l in lines) if ln]
+    lines, cut = _mark_cut_amounts(lines)
     r = ParsedReceipt()
+    if cut:
+        r.notes.append(f"{cut} amount(s) printed without cents look faded; left unread - check the photo")
     r.seller_name = _seller_name(lines)
     r.seller_pin, r.buyer_pin, notes = _pins(lines)
     r.notes.extend(notes)
@@ -412,6 +445,12 @@ def parse_lines(lines: list[str], kra_qr_url: str | None = None) -> ParsedReceip
             r.cu_invoice_no = m.group(1).upper()
             r.notes.append("CU invoice number taken from KRA QR code")
     return r
+
+
+def parse_and_derive(lines: list[str], kra_qr_url: str | None = None) -> dict:
+    """Parse, then fill faded figures that the receipt's own arithmetic proves."""
+    from app.derive import derive
+    return derive(parse_lines(lines, kra_qr_url).to_dict())
 
 
 def parse_text(text: str, kra_qr_url: str | None = None) -> ParsedReceipt:

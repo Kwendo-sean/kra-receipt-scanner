@@ -417,3 +417,76 @@ def test_outbox_waits_for_smtp_config_then_recovers(client, tmp_settings, monkey
     sent = []
     st = emailer.send_due(sender=lambda m: sent.append(m), is_online=lambda: True)
     assert st["sent"] == 1 and emailer.outbox()[0]["status"] == "sent"
+
+
+# ------------------------------------------------------------------ clean scan / import
+
+
+def test_white_background_removes_table():
+    from app.preprocess import paper_mask, white_background
+    img = synth.photograph(synth.render(synth.fuel_8()), angle=0)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    m = paper_mask(gray)
+    assert m is not None
+    out = white_background(gray, m)
+    assert out[5, 5] == 255 and out[-5, -5] == 255          # table corners now white
+    h, w = gray.shape
+    assert (out[h // 2, w // 2] == gray[h // 2, w // 2])     # paper untouched
+    # paper filling the whole frame: no mask, nothing changed
+    full = cv2.cvtColor(synth.render(synth.fuel_8()), cv2.COLOR_BGR2GRAY)
+    assert paper_mask(full) is None
+
+
+def _pdf_with_receipt() -> bytes:
+    import io
+    from PIL import Image
+    img = synth.render(synth.fuel_8())
+    buf = io.BytesIO()
+    Image.fromarray(img[..., ::-1]).save(buf, format="PDF", resolution=150)
+    return buf.getvalue()
+
+
+def test_import_pdf_and_png(client):
+    from app import db, receipts, worker
+    csrf = _pair(client)
+    png = cv2.imencode(".png", synth.render(synth.kiosk_no_vat()))[1].tobytes()
+    r = client.post("/api/receipts/import", headers={"X-CSRF-Token": csrf},
+                    files=[("files", ("scan.pdf", _pdf_with_receipt(), "application/pdf")),
+                           ("files", ("kiosk.png", png, "image/png"))])
+    assert r.status_code == 200, r.text
+    ids = r.json()["ids"]
+    assert len(ids) == 2
+    for rid in ids:
+        fr = receipts.frames(rid)
+        assert len(fr) == 1 and open(fr[0]["path"], "rb").read(3) == b"\xff\xd8\xff"
+    # both queued for OCR; process one and check the clean scan is saved and served
+    FakeEngine.text = synth.fuel_8().text
+    job = db.claim_job(["ocr"])
+    worker.handle_ocr(db.jload(job["payload_json"]), engine_factory=FakeEngine)
+    rid = db.jload(job["payload_json"])["receipt_id"]
+    assert client.get(f"/api/receipts/{rid}").json()["has_scan"] is True
+    s = client.get(f"/media/receipts/{rid}/scan.jpg")
+    assert s.status_code == 200 and s.headers["content-type"] == "image/jpeg"
+    assert TestClient(client.app, base_url="https://testserver").get(f"/media/receipts/{rid}/scan.jpg").status_code == 401
+
+
+def test_import_as_one_long_receipt_and_rejects_junk(client):
+    from app import receipts
+    csrf = _pair(client)
+    jpg = _jpeg()
+    r = client.post("/api/receipts/import", headers={"X-CSRF-Token": csrf}, data={"one_receipt": "true"},
+                    files=[("files", ("a.jpg", jpg, "image/jpeg")), ("files", ("b.jpg", jpg, "image/jpeg"))])
+    ids = r.json()["ids"]
+    assert len(ids) == 1 and len(receipts.frames(ids[0])) == 2
+    bad = client.post("/api/receipts/import", headers={"X-CSRF-Token": csrf},
+                      files=[("files", ("x.txt", b"hello", "text/plain"))])
+    assert bad.status_code == 400
+
+
+def test_ocr_model_size_setting(tmp_settings, monkeypatch):
+    from app import ocr
+    monkeypatch.setattr(tmp_settings, "ocr_extra_dir", str(tmp_settings.data_dir / "nowhere"))
+    with pytest.raises(ValueError):
+        ocr.model_paths("huge", "small")
+    with pytest.raises(FileNotFoundError, match="fetch_models"):
+        ocr.model_paths("small", "medium")

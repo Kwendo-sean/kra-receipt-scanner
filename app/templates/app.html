@@ -34,6 +34,7 @@
 <!-- ============ SCAN (phone only) ============ -->
 <section id="view-scan" class="scanner hidden" aria-label="Scanner" data-phone-only>
   <video id="video" playsinline muted autoplay></video>
+  <svg class="doc-box hidden" id="doc-box" aria-hidden="true"><polygon id="doc-poly" points=""></polygon></svg>
   <div class="guide" id="guide"><i></i><span class="guide-tag" id="guide-tag">ALIGN RECEIPT</span>
     <div class="ghost hidden" id="ghost"></div>
     <div class="target-mark hidden" id="target-mark"><span>MATCH THE LAST SECTION HERE</span></div>
@@ -60,7 +61,11 @@
   <div class="hint" id="hint">Starting camera…</div>
   <div class="thumbs" id="thumbs"></div>
   <div class="scan-bottom">
-    <button type="button" class="scan-btn" id="btn-undo" disabled>Undo last</button>
+    <div class="row">
+      <button type="button" class="scan-btn" id="btn-undo" disabled>Undo last</button>
+      <label class="scan-btn" id="btn-import" for="import-input">Import</label>
+      <input type="file" id="import-input" accept="image/*,application/pdf" multiple class="hidden">
+    </div>
     <button type="button" class="shutter" id="shutter" aria-label="Capture"></button>
     <button type="button" class="scan-btn primary" id="btn-done" disabled>Done</button>
   </div>
@@ -89,7 +94,7 @@
     <div class="row">
       <button class="btn small" id="sel-toggle" type="button">Select</button>
       <label class="btn primary" data-desk-only for="upload-input">Upload photos</label>
-      <input type="file" id="upload-input" accept="image/*" multiple class="hidden">
+      <input type="file" id="upload-input" accept="image/*,application/pdf" multiple class="hidden">
     </div>
   </div>
   <div class="card filters">

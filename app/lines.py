@@ -65,11 +65,25 @@ class Line:
         out = fs[0].text
         for prev, cur in zip(fs, fs[1:]):
             gap = cur.x0 - prev.x1
-            out += ("  " if gap > prev.h else " ") + cur.text
+            txt = cur.text
+            if gap < 0:
+                txt = _drop_repeated_prefix(out, txt)
+                if not txt.strip():
+                    continue
+            out += ("  " if gap > prev.h else " ") + txt.lstrip()
         return out.strip()
 
     def to_dict(self) -> dict:
         return {"text": self.text, "y0": round(self.y0, 1), "y1": round(self.y1, 1), "score": round(self.score, 3)}
+
+
+def _drop_repeated_prefix(left: str, right: str) -> str:
+    """Overlapping boxes read the same characters twice: 'THERMOMETER #15 3' +
+    '3 x 45.00' -> drop the leading '3' of the right fragment."""
+    for k in range(min(len(left), len(right)), 0, -1):
+        if left.endswith(right[:k]) and right[:k].strip():
+            return right[k:]
+    return right
 
 
 def rebuild_lines(frags: list[Fragment]) -> list[Line]:
@@ -88,10 +102,11 @@ def rebuild_lines(frags: list[Fragment]) -> list[Line]:
             d = min(abs(ln.yc - f.yc), abs(g.yc - f.yc))
             limit = 0.5 * min(max(g.h, f.h), med_h * 1.5)
             if d <= limit and (best_d is None or d < best_d):
-                # don't merge two fragments that largely overlap horizontally
-                # (they are stacked); OCR boxes often overlap by a few pixels
-                if any(min(f.x1, g2.x1) - max(f.x0, g2.x0) > 0.5 * min(f.x1 - f.x0, g2.x1 - g2.x0)
-                       for g2 in ln.frags):
+                # Fragments at the same height belong to one line even when their
+                # boxes overlap (the detector sometimes boxes a word twice); only
+                # a near-total overlap with a vertical offset means stacked lines.
+                if any(min(f.x1, g2.x1) - max(f.x0, g2.x0) > 0.8 * min(f.x1 - f.x0, g2.x1 - g2.x0)
+                       and abs(f.yc - g2.yc) > 0.3 * min(f.h, g2.h) for g2 in ln.frags):
                     continue
                 best, best_d = ln, d
         if best is None:

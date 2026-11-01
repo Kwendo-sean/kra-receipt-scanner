@@ -34,6 +34,8 @@ PIP=(.venv/bin/pip install --progress-bar on --prefer-binary
 .venv/bin/pip uninstall -y -q opencv-python 2>/dev/null || true
 .venv/bin/python -c "import cv2, onnxruntime, rapidocr; print('cv2', cv2.__version__, 'ort', onnxruntime.__version__)"
 .venv/bin/python -c "from app.ocr import model_paths; print(model_paths())"
+# more accurate recogniser used automatically for hard / faded receipts (one-time, hash-checked)
+.venv/bin/python scripts/fetch_models.py rec || echo "medium model not fetched (offline?) - faded receipts get one pass only"
 
 echo "== .env"
 if [ ! -f .env ]; then

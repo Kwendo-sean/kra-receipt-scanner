@@ -185,6 +185,26 @@ def photograph(img, seed: int = 1, angle: float = 2.0, fade: bool = True):
     return np.clip(canvas.astype(np.float32) + noise, 0, 255).astype(np.uint8)
 
 
+def fade(img, level: float = 0.6, seed: int = 3):
+    """Simulate aged thermal paper: ink lifts toward paper colour (unevenly, in
+    patches), slight blur and yellowing. level 0 = fresh, 1 = nearly gone."""
+    import cv2
+    import numpy as np
+
+    rnd = np.random.default_rng(seed)
+    g = img[..., 0].astype(np.float32)
+    h, w = g.shape
+    # low-frequency fade map: some regions much paler than others
+    small = rnd.uniform(0.0, 1.0, (max(2, h // 120), max(2, w // 120))).astype(np.float32)
+    patch = cv2.resize(small, (w, h), interpolation=cv2.INTER_CUBIC)
+    strength = np.clip(level * (0.65 + 0.6 * patch), 0, 0.93)
+    paper = 238.0
+    g = g + (paper - g) * strength
+    g = cv2.GaussianBlur(g, (0, 0), 0.6 + 0.6 * level)
+    out = np.dstack([g * 0.97, g * 0.99, g]).clip(0, 255).astype(np.uint8)  # faint yellow (BGR)
+    return out
+
+
 def split_sections(img, n: int, overlap: float = 0.25):
     """Cut a tall image into n overlapping vertical frames (like guided multi-shot)."""
     h = img.shape[0]

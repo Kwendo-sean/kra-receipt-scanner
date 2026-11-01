@@ -16,10 +16,11 @@ from app import config
 from app.lines import Fragment
 
 MODEL_FILES = {
-    "det": "PP-OCRv6_det_small.onnx",
-    "rec": "PP-OCRv6_rec_small.onnx",
+    "det": "PP-OCRv6_det_{size}.onnx",
+    "rec": "PP-OCRv6_rec_{size}.onnx",
     "cls": "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
 }
+SIZES = ("tiny", "small", "medium")
 
 
 def model_dir() -> Path:
@@ -29,26 +30,43 @@ def model_dir() -> Path:
     return Path(rapidocr.__file__).parent / "models"
 
 
-def model_paths() -> dict[str, str]:
-    d = model_dir()
-    paths = {k: str(d / v) for k, v in MODEL_FILES.items()}
+def model_paths(det: str | None = None, rec: str | None = None) -> dict[str, str]:
+    """Explicit local paths only - RapidOCR is never allowed to download."""
+    s = config.settings
+    det, rec = det or s.ocr_det, rec or s.ocr_rec
+    for v in (det, rec):
+        if v not in SIZES:
+            raise ValueError(f"OCR model size must be one of {SIZES}, got {v!r}")
+    bundled, extra = model_dir(), Path(s.ocr_extra_dir)
+
+    def find(name: str) -> str:
+        for d in (bundled, extra):
+            if (d / name).is_file():
+                return str(d / name)
+        return str(bundled / name)
+
+    paths = {"det": find(MODEL_FILES["det"].format(size=det)),
+             "rec": find(MODEL_FILES["rec"].format(size=rec)),
+             "cls": find(MODEL_FILES["cls"])}
     missing = [p for p in paths.values() if not os.path.isfile(p)]
     if missing:
-        raise FileNotFoundError(f"OCR model files missing (will not download): {missing}")
+        raise FileNotFoundError(f"OCR model files missing (will not download): {missing}. "
+                                "For medium models run: python scripts/fetch_models.py")
     return paths
 
 
 class OcrEngine:
     """Context manager: `with OcrEngine() as eng: frags = eng.read(img)`."""
 
-    def __init__(self, threads: int | None = None):
+    def __init__(self, threads: int | None = None, det: str | None = None, rec: str | None = None):
         self.threads = threads or config.settings.ocr_threads
+        self.det, self.rec = det, rec
         self._eng = None
 
     def __enter__(self) -> "OcrEngine":
         from rapidocr import RapidOCR
 
-        p = model_paths()
+        p = model_paths(self.det, self.rec)
         params = {
             "Global.log_level": "error",
             "Global.max_side_len": 4000,
