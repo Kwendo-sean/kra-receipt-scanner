@@ -16,7 +16,8 @@ from app.preprocess import detect_kra_qr, limit_side, load, prepare
 from app.stitch import merge_frame_lines, stitch
 
 
-def _prep_frames(sources: Iterable, max_side: int) -> tuple[list[np.ndarray], list[dict], str | None]:
+def _prep_frames(sources: Iterable, max_side: int,
+                 quads: list | None = None) -> tuple[list[np.ndarray], list[dict], str | None]:
     """Load + pre-process frames one at a time; the full-res original is freed
     before the next one is loaded."""
     grays, infos, qr = [], [], None
@@ -24,11 +25,12 @@ def _prep_frames(sources: Iterable, max_side: int) -> tuple[list[np.ndarray], li
     # Sections of a long receipt are partial views: a per-frame paper crop would
     # cut them inconsistently, so only single shots are perspective-cropped.
     crop = len(sources) == 1
-    for src in sources:
+    quads = quads or [None] * len(sources)
+    for src, quad in zip(sources, quads):
         img = load(src) if isinstance(src, (str, Path)) else src
         if qr is None:
             qr = detect_kra_qr(limit_side(img, 1600))
-        g, info = prepare(img, max_side=max_side, crop=crop)
+        g, info = prepare(img, max_side=max_side, crop=crop, quad=quad if crop else None)
         del img
         grays.append(g)
         infos.append(info)
@@ -82,14 +84,14 @@ def _read(engine_factory, stitched, grays) -> tuple[list[dict], list | None]:
 
 def process_frames_arrays(sources: list, mode: str = "auto", engine_factory: Callable = OcrEngine,
                           progress: Callable[[str], None] | None = None,
-                          retry_factory: Callable | None = None) -> dict:
+                          retry_factory: Callable | None = None, quads: list | None = None) -> dict:
     """mode: 'auto' (stitch, fall back to de-dup), 'stitch', or 'dedupe'.
     Hard receipts get a second OCR pass with a more accurate recogniser
     (retry_factory; by default the medium model when the default engine is used)."""
     say = progress or (lambda m: None)
     max_side = config.settings.ocr_max_side
     say("preprocessing")
-    grays, infos, qr = _prep_frames(sources, max_side)
+    grays, infos, qr = _prep_frames(sources, max_side, quads)
     stitched, sinfo = (None, {"method": "skipped"})
     if mode in ("auto", "stitch"):
         say("stitching" if len(grays) > 1 else "ocr")

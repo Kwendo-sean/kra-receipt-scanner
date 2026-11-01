@@ -531,3 +531,38 @@ def test_shortcut_upload_rejects_empty_and_junk(client):
     h = {"Authorization": f"Bearer {key}"}
     assert phone.post("/api/shortcut/upload", content=b"", headers=h).status_code == 400
     assert phone.post("/api/shortcut/upload", content=b"not an image", headers=h).status_code == 400
+
+
+# ------------------------------------------------------------------ phone-confirmed corners (own document scanner)
+
+
+def test_phone_corners_used_for_flattening():
+    from app.preprocess import prepare
+    img = np.full((1000, 800, 3), 60, np.uint8)
+    pts = np.array([[200, 100], [600, 140], [580, 900], [180, 860]], np.int32)   # skewed receipt
+    cv2.fillConvexPoly(img, pts, (235, 235, 235))
+    quad = [[x / 800, y / 1000] for x, y in pts]
+    g, info = prepare(img, quad=quad)
+    assert info["cropped"] == "phone corners"
+    h, w = g.shape
+    assert 1.6 < h / w < 2.2                      # tall receipt, not the 1000x800 photo
+    assert g.mean() > 200                         # all paper, no dark table left
+
+
+def test_frame_upload_with_corners(client):
+    from app import receipts
+    csrf = _pair(client)
+    rid = client.post("/api/receipts", json={}, headers={"X-CSRF-Token": csrf}).json()["id"]
+    q = [[0.1, 0.05], [0.9, 0.06], [0.88, 0.95], [0.12, 0.94]]
+    import json as _json
+    r = client.post(f"/api/receipts/{rid}/frames", files={"file": ("f.jpg", _jpeg(), "image/jpeg")},
+                    data={"idx": "0", "quad": _json.dumps(q)}, headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 200
+    assert receipts.frames(rid)[0]["quad"] == q
+    bad = client.post(f"/api/receipts/{rid}/frames", files={"file": ("f.jpg", _jpeg(), "image/jpeg")},
+                      data={"idx": "0", "quad": "[[0,0],[1,0]]"}, headers={"X-CSRF-Token": csrf})
+    assert bad.status_code == 400
+    # retake without corners clears the old ones
+    client.post(f"/api/receipts/{rid}/frames", files={"file": ("f.jpg", _jpeg(), "image/jpeg")},
+                data={"idx": "0"}, headers={"X-CSRF-Token": csrf})
+    assert receipts.frames(rid)[0]["quad"] is None

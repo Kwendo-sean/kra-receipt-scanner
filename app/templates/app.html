@@ -70,6 +70,24 @@
     <button type="button" class="scan-btn primary" id="btn-done" disabled>Done</button>
   </div>
   <div class="cam-error hidden" id="cam-error"></div>
+  <!-- review after capture: flattened scan + draggable corners (document-scanner style) -->
+  <div class="review hidden" id="review">
+    <div class="review-head"><span class="live-dot ok"></span><span class="eyebrow">Scan · drag the corners to adjust</span></div>
+    <div class="review-stage" id="review-stage">
+      <img id="review-img" alt="Captured photo">
+      <svg id="review-svg" preserveAspectRatio="xMidYMid meet">
+        <polygon id="review-poly" points=""></polygon>
+        <circle class="handle" r="20" data-i="0"></circle><circle class="handle" r="20" data-i="1"></circle>
+        <circle class="handle" r="20" data-i="2"></circle><circle class="handle" r="20" data-i="3"></circle>
+      </svg>
+    </div>
+    <div class="review-flat-wrap"><canvas id="review-flat"></canvas></div>
+    <div class="review-bar">
+      <button type="button" class="scan-btn" id="rv-retake">Retake</button>
+      <div class="review-timer"><i id="rv-timer"></i></div>
+      <button type="button" class="scan-btn primary" id="rv-keep">Keep scan</button>
+    </div>
+  </div>
 </section>
 
 <!-- ============ OVERVIEW (desktop) ============ -->

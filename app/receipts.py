@@ -51,8 +51,25 @@ def _is_jpeg(data: bytes) -> bool:
     return data[:3] == b"\xff\xd8\xff"
 
 
-def add_frame(rid: int, data: bytes, idx: int | None = None, sharpness: float | None = None) -> int:
-    """Store one JPEG still. Re-using an idx replaces that section (retake)."""
+def parse_quad(raw) -> list[list[float]] | None:
+    """Corners confirmed on the phone: 4 [x, y] pairs as fractions of the photo."""
+    if raw in (None, ""):
+        return None
+    import json
+    try:
+        q = json.loads(raw) if isinstance(raw, str) else raw
+        q = [[float(p[0]), float(p[1])] for p in q]
+    except (ValueError, TypeError, IndexError):
+        raise ValidationError("Bad corner data")
+    if len(q) != 4 or any(not (-0.05 <= v <= 1.05) for p in q for v in p):
+        raise ValidationError("Bad corner data")
+    return q
+
+
+def add_frame(rid: int, data: bytes, idx: int | None = None, sharpness: float | None = None,
+              quad: list[list[float]] | None = None) -> int:
+    """Store one JPEG still (+ optional phone-confirmed corners). Re-using an idx
+    replaces that section (retake)."""
     if not _is_jpeg(data):
         raise ValidationError("Frame must be a JPEG image")
     if len(data) > MAX_FRAME_BYTES:
@@ -69,6 +86,12 @@ def add_frame(rid: int, data: bytes, idx: int | None = None, sharpness: float | 
     tmp = path.with_suffix(".tmp")
     tmp.write_bytes(data)
     os.replace(tmp, path)
+    qpath = path.with_suffix(".quad.json")
+    if quad:
+        import json
+        qpath.write_text(json.dumps(quad), encoding="utf-8")
+    elif qpath.exists():
+        qpath.unlink()
     w = h = None
     try:
         import cv2
@@ -162,7 +185,14 @@ def delete_frame(rid: int, idx: int) -> None:
 
 
 def frames(rid: int) -> list[dict]:
-    return [dict(r) for r in db.all_("SELECT * FROM frames WHERE receipt_id=? ORDER BY idx", rid)]
+    import json
+    out = []
+    for r in db.all_("SELECT * FROM frames WHERE receipt_id=? ORDER BY idx", rid):
+        d = dict(r)
+        q = Path(d["path"]).with_suffix(".quad.json")
+        d["quad"] = json.loads(q.read_text(encoding="utf-8")) if q.is_file() else None
+        out.append(d)
+    return out
 
 
 def submit(rid: int, ocr_mode: str = "auto") -> int:

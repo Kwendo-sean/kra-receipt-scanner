@@ -277,7 +277,125 @@
     // touching 3+ frame edges = paper fills the view: no outline to draw
     const edges = (minX === 0) + (maxX === w - 1) + (minY === 0) + (maxY === h - 1);
     if (edges >= 3) return null;
-    return [[tl[0], tl[1]], [tr[0] + 1, tr[1]], [br[0] + 1, br[1] + 1], [bl[0], bl[1] + 1]];
+    const rough = [[tl[0], tl[1]], [tr[0] + 1, tr[1]], [br[0] + 1, br[1] + 1], [bl[0], bl[1] + 1]];
+    return refineQuad(lab, bestLab, w, h, rough);
+  }
+
+  // Document-scanner style corners: fit a straight line to each side of the
+  // paper's outline (ignoring the frame border and the corner zones, where
+  // torn/curled corners live) and intersect neighbouring sides.
+  function refineQuad(lab, id, w, h, q) {
+    const sides = [[], [], [], []];
+    const segDist = (x, y, a, b) => {
+      const vx = b[0] - a[0], vy = b[1] - a[1], L2 = vx * vx + vy * vy || 1;
+      const t = ((x - a[0]) * vx + (y - a[1]) * vy) / L2;
+      if (t < 0.12 || t > 0.88) return Infinity;            // skip corner zones
+      const px = a[0] + t * vx - x, py = a[1] + t * vy - y;
+      return Math.sqrt(px * px + py * py);
+    };
+    const diag = Math.hypot(w, h);
+    // true outside = non-paper pixels reachable from the frame border (holes
+    // left by printed text inside the paper are not "outside")
+    const out = new Uint8Array(w * h), st = new Int32Array(w * h);
+    let sp = 0;
+    const push = (p) => { if (!out[p] && lab[p] !== id) { out[p] = 1; st[sp++] = p; } };
+    for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+    for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+    while (sp) {
+      const p = st[--sp], x = p % w;
+      if (x > 0) push(p - 1);
+      if (x < w - 1) push(p + 1);
+      if (p >= w) push(p - w);
+      if (p < w * (h - 1)) push(p + w);
+    }
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const p = y * w + x;
+        if (lab[p] !== id) continue;
+        if (!(out[p - 1] || out[p + 1] || out[p - w] || out[p + w])) continue;
+        let bi = -1, bd = 0.08 * diag;
+        for (let i = 0; i < 4; i++) {
+          const d = segDist(x, y, q[i], q[(i + 1) % 4]);
+          if (d < bd) { bd = d; bi = i; }
+        }
+        if (bi >= 0) sides[bi].push(x, y);
+      }
+    }
+    const lines = sides.map((pts) => {
+      const n = pts.length / 2;
+      if (n < 6) return null;
+      let mx = 0, my = 0;
+      for (let i = 0; i < pts.length; i += 2) { mx += pts[i]; my += pts[i + 1]; }
+      mx /= n; my /= n;
+      let sxx = 0, syy = 0, sxy = 0;
+      for (let i = 0; i < pts.length; i += 2) {
+        const dx = pts[i] - mx, dy = pts[i + 1] - my;
+        sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+      }
+      const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);      // principal direction
+      return { x: mx, y: my, dx: Math.cos(ang), dy: Math.sin(ang) };
+    });
+    const meet = (a, b) => {
+      const den = a.dx * b.dy - a.dy * b.dx;
+      if (Math.abs(den) < 1e-3) return null;
+      const t = ((b.x - a.x) * b.dy - (b.y - a.y) * b.dx) / den;
+      return [a.x + t * a.dx, a.y + t * a.dy];
+    };
+    // corner i joins side i-1 (into the corner) and side i (out of it)
+    return q.map((c, i) => {
+      const a = lines[(i + 3) % 4], b = lines[i];
+      if (!a || !b) return c;
+      const m = meet(a, b);
+      return m && Math.hypot(m[0] - c[0], m[1] - c[1]) < 0.12 * diag ? m : c;
+    });
+  }
+
+  // ---------------------------------------------------------------- flatten
+  // Homography mapping the output rectangle (0..W, 0..H) onto the source quad.
+  function homography(quad, W, H) {
+    const src = [[0, 0], [W, 0], [W, H], [0, H]], A = [], bv = [];
+    for (let i = 0; i < 4; i++) {
+      const [x, y] = src[i], [u, v] = quad[i];
+      A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); bv.push(u);
+      A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); bv.push(v);
+    }
+    for (let c = 0; c < 8; c++) {                            // Gaussian elimination
+      let piv = c;
+      for (let r = c + 1; r < 8; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+      [A[c], A[piv]] = [A[piv], A[c]]; [bv[c], bv[piv]] = [bv[piv], bv[c]];
+      for (let r = 0; r < 8; r++) {
+        if (r === c) continue;
+        const f = A[r][c] / A[c][c];
+        for (let k = c; k < 8; k++) A[r][k] -= f * A[c][k];
+        bv[r] -= f * bv[c];
+      }
+    }
+    const hh = bv.map((v, i) => v / A[i][i]);
+    return [...hh, 1];
+  }
+
+  // Render the quad of `img` (ImageData) as a flat W x H grayscale "scan".
+  function flatten(img, quad, W, H) {
+    const m = homography(quad, W, H), out = new ImageData(W, H), s = img.data, sw = img.width, sh = img.height;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const z = m[6] * x + m[7] * y + 1;
+        const u = (m[0] * x + m[1] * y + m[2]) / z, v = (m[3] * x + m[4] * y + m[5]) / z;
+        const xi = Math.min(sw - 1, Math.max(0, u | 0)), yi = Math.min(sh - 1, Math.max(0, v | 0));
+        const k = (yi * sw + xi) * 4, o = (y * W + x) * 4;
+        const g = (s[k] * 77 + s[k + 1] * 150 + s[k + 2] * 29) >> 8;
+        out.data[o] = out.data[o + 1] = out.data[o + 2] = g; out.data[o + 3] = 255;
+      }
+    }
+    return out;
+  }
+
+  // Output size from the quad's side lengths (keeps the receipt's proportions).
+  function flatSize(q, maxW) {
+    const d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+    const w = Math.max(d(q[0], q[1]), d(q[3], q[2])), h = Math.max(d(q[0], q[3]), d(q[1], q[2]));
+    const f = Math.min(1, maxW / w);
+    return [Math.max(1, Math.round(w * f)), Math.max(1, Math.round(h * f))];
   }
 
   // 3x box-downsample of the SAMPLE_W gray frame to MATCH_W columns
@@ -339,6 +457,10 @@
 
   Scanner._reduce = reduce;      // exposed for tests
   Scanner._findPaperQuad = findPaperQuad;
+  Scanner.findPaperQuad = findPaperQuad;
+  Scanner.flatten = flatten;
+  Scanner.flatSize = flatSize;
+  Scanner._homography = homography;
   Scanner._matchRef = matchRef;
   Scanner.STRIP = STRIP;
   Scanner.TARGET = TARGET;

@@ -227,10 +227,11 @@ async def _json(request: Request) -> dict:
 
 @app.post("/api/receipts/{rid}/frames")
 async def upload_frame(rid: int, file: UploadFile = File(...), idx: int | None = Form(None),
-                       sharpness: float | None = Form(None), sess: dict = Depends(require_session)):
+                       sharpness: float | None = Form(None), quad: str | None = Form(None),
+                       sess: dict = Depends(require_session)):
     data = await file.read(receipts.MAX_FRAME_BYTES + 1)
     try:
-        i = receipts.add_frame(rid, data, idx, sharpness)
+        i = receipts.add_frame(rid, data, idx, sharpness, receipts.parse_quad(quad))
     except receipts.ValidationError as e:
         raise _bad(e)
     return {"idx": i}

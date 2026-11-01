@@ -37,10 +37,12 @@ def handle_ocr(payload: dict, engine_factory=None) -> dict:
     row = db.one("SELECT ocr_mode FROM receipts WHERE id=? AND deleted=0", rid)
     if not row:
         return {"skipped": "deleted"}
-    paths = [f["path"] for f in receipts.frames(rid)]
+    fr = receipts.frames(rid)
+    paths = [f["path"] for f in fr]
+    quads = [f.get("quad") for f in fr]
     db.run("UPDATE receipts SET status='processing', stage='preprocessing', error=NULL WHERE id=?", rid)
     res = process_frames_arrays(paths, mode=row["ocr_mode"], engine_factory=engine_factory or OcrEngine,
-                                progress=lambda s: _stage(rid, s))
+                                progress=lambda s: _stage(rid, s), quads=quads)
     stitched_path = None
     if res["stitched"] is not None:
         stitched_path = str(receipts.receipt_dir(rid) / "stitched.jpg")

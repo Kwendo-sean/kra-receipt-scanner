@@ -36,4 +36,17 @@ q = find(scene([[0, 0], [1, 0], [1, 1], [0, 1]]), W, H);
 check("no paper -> null", q === null, q);
 q = find(scene([[0, 0], [W, 0], [W, H], [0, H]]), W, H);
 check("paper fills frame -> null", q === null, q);
+// torn top-right corner: a triangle of paper missing; the box should still sit
+// on the true corner (where the two edges meet), not on the tear
+const torn = scene(tilted);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  if ((x - 100) + (40 - y) > 14 && x > 90 && y < 60) { const i = (y * W + x) * 4; torn[i] = torn[i + 1] = torn[i + 2] = 70; }
+}
+q = find(torn, W, H);
+check("torn corner -> line-fit corner near true corner", q && near(q[1], tilted[1], 6), q);
+
+// homography: output rectangle corners land exactly on the quad
+const Hm = window.Scanner._homography(tilted, 300, 700);
+const map = (x, y) => { const z = Hm[6] * x + Hm[7] * y + 1; return [(Hm[0] * x + Hm[1] * y + Hm[2]) / z, (Hm[3] * x + Hm[4] * y + Hm[5]) / z]; };
+check("homography maps corners", [[0, 0], [300, 0], [300, 700], [0, 700]].every((p, i) => near(map(...p), tilted[i], 0.01)), tilted.map((_, i) => map(...[[0, 0], [300, 0], [300, 700], [0, 700]][i])));
 process.exit(fail ? 1 : 0);

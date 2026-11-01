@@ -183,10 +183,18 @@ def white_background(gray: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
     return out
 
 
-def prepare(img: np.ndarray, max_side: int = 1600, crop: bool = True) -> tuple[np.ndarray, dict]:
-    """Full pipeline -> grayscale image ready for OCR, plus a debug info dict."""
+def prepare(img: np.ndarray, max_side: int = 1600, crop: bool = True,
+            quad: list | None = None) -> tuple[np.ndarray, dict]:
+    """Full pipeline -> grayscale image ready for OCR, plus a debug info dict.
+    `quad`: corners confirmed on the phone (fractions of the photo) - used for the
+    perspective flatten instead of detecting the paper again."""
     info: dict = {"in_size": list(img.shape[:2])}
-    if crop:
+    if quad:
+        h, w = img.shape[:2]
+        pts = np.array([[x * w, y * h] for x, y in quad], np.float32)
+        img = perspective_crop(img, _order(pts))
+        info["cropped"] = "phone corners"
+    elif crop:
         quad = find_receipt_quad(img)
         if quad is not None:
             img = perspective_crop(img, quad)

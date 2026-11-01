@@ -239,6 +239,14 @@
     $("#hint").textContent = "Captured";
     try {
       const { blob, sharpness } = await scanner.capture();
+      let quad = null;
+      if (scan.mode === "single") {
+        scanner.armed = false;                       // no auto-capture while reviewing
+        const r = await reviewScan(blob);
+        scanner.armed = true;
+        if (!r) { $("#hint").textContent = "Retake: fit the receipt in the frame"; return; }
+        quad = r.quad;
+      }
       const rid = await ensureReceipt();
       const idx = scan.retakeIdx !== null ? scan.retakeIdx : (scan.frames.length ? Math.max(...scan.frames.map((f) => f.idx)) + 1 : 0);
       const url = URL.createObjectURL(blob);
@@ -252,6 +260,7 @@
       fd.append("file", blob, `frame${idx}.jpg`);
       fd.append("idx", String(idx));
       if (sharpness) fd.append("sharpness", String(Math.round(sharpness)));
+      if (quad) fd.append("quad", JSON.stringify(quad));
       const up = api("POST", `/api/receipts/${rid}/frames`, fd, true).then(() => {
         const f = scan.frames.find((x) => x.idx === idx); if (f) f.state = "ok"; renderThumbs();
       }).catch((e) => { toast("Upload failed: " + e.message); const f = scan.frames.find((x) => x.idx === idx); if (f) f.state = "failed"; renderThumbs(); });
@@ -265,6 +274,89 @@
       $("#shutter").classList.remove("busy");
       updateScanButtons();
     }
+  }
+
+  // ---------------------------------------------------------------- review (document-scanner style)
+  // Find the paper's corners on the captured photo, show a flattened preview,
+  // let the user drag the corners; resolves {quad (0..1 of the photo)} or null (retake).
+  const AUTO_KEEP_MS = 2500;
+  async function reviewScan(blob) {
+    const bmp = await createImageBitmap(blob);
+    const k = Math.min(1, 1400 / Math.max(bmp.width, bmp.height));
+    const W = Math.round(bmp.width * k), H = Math.round(bmp.height * k);
+    const wc = document.createElement("canvas");
+    wc.width = W; wc.height = H;
+    wc.getContext("2d").drawImage(bmp, 0, 0, W, H);
+    const work = wc.getContext("2d").getImageData(0, 0, W, H);
+    // detect on a small copy, scale corners back up
+    const sw = 240, shh = Math.round(H * sw / W), sc = document.createElement("canvas");
+    sc.width = sw; sc.height = shh;
+    sc.getContext("2d").drawImage(wc, 0, 0, sw, shh);
+    let quad = window.Scanner.findPaperQuad(sc.getContext("2d").getImageData(0, 0, sw, shh).data, sw, shh);
+    quad = quad ? quad.map(([x, y]) => [x * W / sw, y * H / shh])
+      : [[W * 0.06, H * 0.04], [W * 0.94, H * 0.04], [W * 0.94, H * 0.96], [W * 0.06, H * 0.96]];
+
+    const box = $("#review"), svg = $("#review-svg"), poly = $("#review-poly"), flat = $("#review-flat");
+    const handles = $$("#review-svg .handle");
+    const url = URL.createObjectURL(blob);
+    $("#review-img").src = url;
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    const r = Math.round(Math.max(W, H) * 0.035);
+    handles.forEach((h) => h.setAttribute("r", r));
+    function draw(previewToo) {
+      poly.setAttribute("points", quad.map((p) => p.map((v) => v.toFixed(1)).join(",")).join(" "));
+      handles.forEach((h, i) => { h.setAttribute("cx", quad[i][0]); h.setAttribute("cy", quad[i][1]); });
+      if (previewToo) {
+        const [fw, fh] = window.Scanner.flatSize(quad, 420);
+        flat.width = fw; flat.height = fh;
+        flat.getContext("2d").putImageData(window.Scanner.flatten(work, quad, fw, fh), 0, 0);
+      }
+    }
+    draw(true);
+    box.classList.remove("hidden");
+
+    return await new Promise((resolve) => {
+      let dragging = -1, timer = null, start = 0, raf = 0;
+      const toSvg = (ev) => {
+        const pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
+        const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+        return [Math.min(W, Math.max(0, p.x)), Math.min(H, Math.max(0, p.y))];
+      };
+      const stopTimer = () => { clearTimeout(timer); cancelAnimationFrame(raf); timer = null; $("#rv-timer").style.width = "0"; };
+      const done = (val) => {
+        stopTimer();
+        svg.removeEventListener("pointerdown", down); svg.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        $("#rv-keep").onclick = null; $("#rv-retake").onclick = null;
+        box.classList.add("hidden");
+        URL.revokeObjectURL(url);
+        resolve(val);
+      };
+      const down = (ev) => {
+        stopTimer();                                          // touching = the user is adjusting
+        const p = toSvg(ev);
+        let bi = -1, bd = Infinity;
+        quad.forEach((q, i) => { const d = Math.hypot(q[0] - p[0], q[1] - p[1]); if (d < bd) { bd = d; bi = i; } });
+        if (bd < r * 3) { dragging = bi; svg.setPointerCapture(ev.pointerId); ev.preventDefault(); }
+      };
+      const move = (ev) => { if (dragging < 0) return; quad[dragging] = toSvg(ev); draw(false); };
+      const up = () => { if (dragging >= 0) { dragging = -1; draw(true); } };
+      svg.addEventListener("pointerdown", down);
+      svg.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      $("#rv-keep").onclick = () => done({ quad: quad.map(([x, y]) => [x / W, y / H]) });
+      $("#rv-retake").onclick = () => done(null);
+      if (scanner.auto) {                                     // auto mode: keep unless touched
+        start = performance.now();
+        const tick = () => {
+          const f = Math.min(1, (performance.now() - start) / AUTO_KEEP_MS);
+          $("#rv-timer").style.width = (f * 100).toFixed(1) + "%";
+          if (timer) raf = requestAnimationFrame(tick);
+        };
+        timer = setTimeout(() => $("#rv-keep").onclick(), AUTO_KEEP_MS);
+        raf = requestAnimationFrame(tick);
+      }
+    });
   }
 
   function renderThumbs() {

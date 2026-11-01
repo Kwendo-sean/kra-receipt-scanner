@@ -83,6 +83,7 @@ You can see and revoke paired phones under **Settings → Paired phones**.
 
 ## 4. Scanning
 
+- **Built-in document scanner (phone):** while you aim, a box tracks the receipt's edges. Each side is a fitted straight line, so torn or curled corners don't throw it off. The box turns green when the shot is sharp and steady, and the photo is captured automatically. A review screen then shows the flattened scan, and you can drag the four corners to adjust it. In Auto mode it keeps the scan after 2.5 s unless you touch it. The Pi flattens the receipt using the corners you confirmed. No LiDAR is needed; it's camera-only, like Apple's scanner.
 - **Short receipts:** hold the phone over the receipt inside the frame. The meter turns green when the image is sharp, and the app captures automatically once you hold steady. You can also tap the shutter yourself. The receipt is queued straight away, so you can keep scanning.
 - **Long receipts:** switch to **Long** and capture the top section. Then slide the phone down the receipt:
   - The top quarter of the frame shows the end of your last shot, with a dashed amber **marker** below it.
