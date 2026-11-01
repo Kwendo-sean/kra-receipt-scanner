@@ -125,8 +125,20 @@
   });
 
   // Green "continue from here" line: where the previous section ended, tracked live.
+  function placeGhost(a) {
+    const g = $("#ghost");
+    if (!a || !a.found) { g.style.top = ""; g.style.height = ""; g.style.transform = ""; return; }
+    // the faded strip sits on the live print it was matched to: if they don't
+    // line up on screen, the tracker is wrong and you can see it
+    const h = window.Scanner.STRIP * a.scale;
+    g.style.top = ((a.endFrac - h) * 100).toFixed(1) + "%";
+    g.style.height = (h * 100).toFixed(1) + "%";
+    g.style.transform = `translateX(${(a.drift * 100).toFixed(1)}%) scaleX(${a.scale.toFixed(3)})`;
+  }
+
   function showAlign(a) {
     const line = $("#cont-line"), guide = $("#guide");
+    placeGhost(a);
     if (!a || !a.found) {
       line.classList.add("hidden");
       guide.classList.remove("aligned");
@@ -144,7 +156,8 @@
     if (a.aligned && !lastAligned && navigator.vibrate) navigator.vibrate(40);
     lastAligned = a.aligned;
     if (scan.busy) return;
-    $("#hint").textContent = a.aligned ? (scanner.auto ? "Aligned: capturing…" : "Aligned: tap the shutter")
+    $("#hint").textContent = Math.abs(a.drift) > 0.07 ? "Keep the phone straight over the receipt"
+      : a.aligned ? (scanner.auto ? "Aligned: capturing…" : "Aligned: tap the shutter")
       : a.tooHigh ? "Too far: move back up until the green line meets the marker"
         : "Slide down until the green line meets the dashed marker";
   }
@@ -163,6 +176,7 @@
     lastAligned = false;
     $("#cont-line").classList.add("hidden");
     $("#guide").classList.remove("aligned");
+    placeGhost(null);
     if (snap && snap.ghost) {
       ghost.style.backgroundImage = `url("${snap.ghost}")`;
       ghost.classList.remove("hidden");

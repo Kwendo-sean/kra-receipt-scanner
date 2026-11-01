@@ -4,7 +4,7 @@
   "use strict";
 
   const SAMPLE_W = 240;          // downscaled analysis width
-  const SAMPLE_MS = 140;
+  const SAMPLE_MS = 100;          // ~10 Hz: small steps between samples keep the overlap track locked
   const MIN_SHARP = 60;          // absolute floor (Laplacian variance at SAMPLE_W)
   const REL_SHARP = 0.8;         // and >= 80% of the recent best
   const STABLE_DIFF = 5;         // mean abs pixel diff between samples
@@ -14,8 +14,13 @@
   // of the live frame. TARGET is where its end should sit (~25% overlap).
   const STRIP = 0.25;
   const TARGET = 0.25, ALIGN_LO = 0.15, ALIGN_HI = 0.36;
-  const MATCH_W = 80;            // matching resolution (cheap enough for ~7 Hz)
-  const MIN_SCORE = 0.68;        // zero-mean normalised cross-correlation
+  const MATCH_W = 96;            // matching resolution
+  const HP_R = 6;                // local-mean radius removed before matching (shadows, light falloff)
+  const MIN_SCORE = 0.72;        // zero-mean normalised cross-correlation of the print texture
+  const MIN_OVERLAP = 0.12;      // fraction of the previous section that must still be in view
+  const DRIFT_C = 5;             // sideways search, half-size pixels (~10% of the width)
+  const PULL = 0.006;            // NCC penalty per row away from the predicted position
+  const ALIGN_HOLD = 2;          // consecutive aligned samples before auto-capture
 
   class Scanner {
     constructor(opts) {
@@ -32,6 +37,10 @@
       this.ref = null;           // reduced gray of the last long-receipt section
       this.align = null;
       this.lastReduced = null;
+      this.pose = null;          // tracked position of the previous section
+      this.misses = 0;
+      this.alignHold = 0;
+      this.shownEnd = null;
       this.stream = null;
       this.track = null;
       this.imageCapture = null;
@@ -128,10 +137,7 @@
       }
       this.prev = gray;
       this.lastReduced = reduce(gray, sw, sh);
-      if (this.ref) {
-        this.align = matchRef(this.ref, this.lastReduced);
-        this.onAlign(this.align);
-      }
+      if (this.ref) this.followRef();
       this.stableCount = diff < STABLE_DIFF ? this.stableCount + 1 : 0;
       const now = Date.now();
       this.recent.push({ t: now, s: sharp });
@@ -141,7 +147,7 @@
       const isSharp = sharp >= threshold && sharp >= MIN_SHARP;
       const stable = this.stableCount >= STABLE_SAMPLES;
       this.onSample({ sharp, threshold: MIN_SHARP, isSharp, stable, diff });
-      const placed = !this.ref || (this.align && this.align.aligned);
+      const placed = !this.ref || (this.align && this.align.aligned && this.alignHold >= ALIGN_HOLD);
       if (this.auto && this.armed && placed && isSharp && stable && now - this.lastCapture > COOLDOWN_MS) {
         this.lastCapture = now;
         this.onAutoCapture();
@@ -194,6 +200,32 @@
     setReference(snap) {
       this.ref = snap ? snap.ref : null;
       this.align = null;
+      // right after a capture the view IS the reference: start tracking from "not moved"
+      this.pose = { s: 1, tx: 0, ty: 0, vy: 0 };
+      this.misses = 0;
+      this.alignHold = 0;
+      this.shownEnd = null;
+    }
+
+    // Follow the previous section frame to frame; smooth the line, but let real
+    // jumps (re-acquired after a loss) through at once.
+    followRef() {
+      const a = matchRef(this.ref, this.lastReduced, this.pose);
+      if (a.found) {
+        this.pose = a.pose;
+        this.misses = 0;
+        const e = a.endFrac;
+        this.shownEnd = this.shownEnd === null || Math.abs(e - this.shownEnd) > 0.08 ? e : 0.55 * e + 0.45 * this.shownEnd;
+        a.endFrac = this.shownEnd;
+        a.aligned = a.endFrac >= ALIGN_LO && a.endFrac <= ALIGN_HI;
+        a.tooHigh = a.endFrac < ALIGN_LO;
+        this.alignHold = a.aligned ? this.alignHold + 1 : 0;
+      } else {
+        this.alignHold = 0;
+        if (++this.misses >= 3) { this.pose = null; this.shownEnd = null; }   // re-acquire with a full search
+      }
+      this.align = a;
+      this.onAlign(a);
     }
 
     // Full-resolution JPEG still. Uses ImageCapture.takePhoto when available
@@ -398,10 +430,14 @@
     return [Math.max(1, Math.round(w * f)), Math.max(1, Math.round(h * f))];
   }
 
-  // 3x box-downsample of the SAMPLE_W gray frame to MATCH_W columns
+  // ---------------------------------------------------------------- overlap tracker
+  // Box-downsample the SAMPLE_W gray frame to MATCH_W columns, then keep only the
+  // print texture (gray minus its local mean): the phone's shadow and uneven
+  // light move with the phone, the print doesn't. Plus a half-size level for
+  // the coarse search.
   function reduce(gray, sw, sh) {
     const f = sw / MATCH_W, w = MATCH_W, h = Math.max(1, Math.floor(sh / f));
-    const out = new Float32Array(w * h);
+    const lo = new Float32Array(w * h);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         let s = 0, n = 0;
@@ -410,49 +446,139 @@
           const yy = y0 + dy, xx = x0 + dx;
           if (yy < sh && xx < sw) { s += gray[yy * sw + xx]; n++; }
         }
-        out[y * w + x] = s / n;
+        lo[y * w + x] = s / n;
       }
     }
-    return { g: out, w, h };
+    // integral image -> local mean over a (2R+1)^2 window
+    const R = HP_R, I = new Float64Array((w + 1) * (h + 1));
+    for (let y = 0; y < h; y++) {
+      let row = 0;
+      for (let x = 0; x < w; x++) { row += lo[y * w + x]; I[(y + 1) * (w + 1) + x + 1] = I[y * (w + 1) + x + 1] + row; }
+    }
+    const g = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - R), y1 = Math.min(h, y + R + 1);
+      for (let x = 0; x < w; x++) {
+        const x0 = Math.max(0, x - R), x1 = Math.min(w, x + R + 1);
+        const s = I[y1 * (w + 1) + x1] - I[y0 * (w + 1) + x1] - I[y1 * (w + 1) + x0] + I[y0 * (w + 1) + x0];
+        g[y * w + x] = lo[y * w + x] - s / ((y1 - y0) * (x1 - x0));
+      }
+    }
+    const cw = w >> 1, ch = h >> 1, c = new Float32Array(cw * ch);
+    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+      const i = 2 * y * w + 2 * x;
+      c[y * cw + x] = 0.25 * (g[i] + g[i + 1] + g[i + w] + g[i + w + 1]);
+    }
+    return { g, w, h, c: { g: c, w: cw, h: ch } };
   }
 
-  // Where does the bottom STRIP of `ref` appear in `live`? Zero-mean NCC over
-  // vertical offsets. endFrac = where the previous section ends, as a fraction
-  // of the live frame height (1.0 = not moved yet; TARGET = right overlap).
-  function matchRef(ref, live) {
-    const w = Math.min(ref.w, live.w);
-    const ps = Math.floor(ref.h * (1 - STRIP)), H = ref.h - ps;
-    if (H < 4 || live.h < H) return { found: false, reason: "small" };
-    // texture check on the whole strip
-    let m0 = 0, v0 = 0;
-    for (let y = 0; y < H; y++) for (let x = 0; x < w; x++) m0 += ref.g[(ps + y) * ref.w + x];
-    m0 /= H * w;
-    for (let y = 0; y < H; y++) for (let x = 0; x < w; x++) { const d = ref.g[(ps + y) * ref.w + x] - m0; v0 += d * d; }
-    if (Math.sqrt(v0 / (H * w)) < 6) return { found: false, reason: "blank" };   // blank paper: nothing to lock onto
-    // oy < 0: only the lower part of the strip is still visible at the top
-    // (moved too far); compare just the visible rows (at least 40% of the strip).
-    const minRows = Math.ceil(H * 0.4);
-    let best = -1, bestY = 0;
-    for (let oy = -(H - minRows); oy + H <= live.h; oy++) {
-      const r0 = Math.max(0, -oy), rows = H - r0;
-      let am = 0, bm = 0;
-      for (let y = r0; y < H; y++) for (let x = 0; x < w; x++) { am += ref.g[(ps + y) * ref.w + x]; bm += live.g[(oy + y) * live.w + x]; }
-      am /= rows * w; bm /= rows * w;
-      let cov = 0, av = 0, bv = 0;
-      for (let y = r0; y < H; y++) {
-        for (let x = 0; x < w; x++) {
-          const p = ref.g[(ps + y) * ref.w + x] - am, q = live.g[(oy + y) * live.w + x] - bm;
-          cov += p * q; av += p * p; bv += q * q;
+  // NCC of ref vs live under: ref (x, y) -> live (cx + s(x - cx) + tx, s*y + ty).
+  // Only the rows that overlap are compared; small overlaps pay a penalty
+  // (fewer rows = easier to match by chance).
+  function nccAt(ref, live, s, tx, ty, xstep, ystep = 1) {
+    const cx = ref.w / 2;
+    const y0 = Math.max(0, Math.ceil(-ty / s)), y1 = Math.min(ref.h, Math.floor((live.h - 1 - ty) / s) + 1);
+    const rows = y1 - y0;
+    if (rows < MIN_OVERLAP * ref.h) return -2;
+    let n = 0, sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+    for (let y = y0; y < y1; y += ystep) {
+      const ly = Math.round(s * y + ty) * live.w, ry = y * ref.w;
+      for (let x = 0; x < ref.w; x += xstep) {
+        const lx = Math.round(cx + s * (x - cx) + tx);
+        if (lx < 0 || lx >= live.w) continue;
+        const a = ref.g[ry + x], b = live.g[ly + lx];
+        n++; sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
+      }
+    }
+    if (n < 30) return -2;
+    const cov = sab - sa * sb / n, va = saa - sa * sa / n, vb = sbb - sb * sb / n;
+    const full = 0.25 * ref.h;
+    return cov / (Math.sqrt(va * vb) + 1e-6) - (rows < full ? 0.1 * (full - rows) / full : 0);
+  }
+
+  // Best (s, tx, ty) in a small box around a guess, at full matching resolution.
+  // `pull` > 0 prefers rows near the guess: a hand moves smoothly, so a match one
+  // printed line away from the prediction is usually the line's twin, not a jump.
+  function refine(ref, live, g, rTy, rTx, scales, ystep = 1, pull = 0) {
+    let best = { score: -2, fit: -2 };
+    for (const s of scales) {
+      for (let ty = Math.round(g.ty) - rTy; ty <= Math.round(g.ty) + rTy; ty++) {
+        for (let tx = Math.round(g.tx) - rTx; tx <= Math.round(g.tx) + rTx; tx++) {
+          const sc = nccAt(ref, live, s, tx, ty, 2, ystep), fit = sc - pull * Math.abs(ty - g.ty);
+          if (fit > best.fit) best = { score: sc, fit, s, tx, ty };
         }
       }
-      // partial overlaps must score a bit higher (fewer rows = easier to fake)
-      const score = cov / (Math.sqrt(av * bv) + 1e-6) - (r0 ? 0.08 * r0 / H : 0);
-      if (score > best) { best = score; bestY = oy; }
     }
-    if (best < MIN_SCORE) return { found: false, reason: "lost", score: best };
-    const endFrac = (bestY + H) / live.h;
-    return { found: true, score: best, endFrac, aligned: endFrac >= ALIGN_LO && endFrac <= ALIGN_HI,
-             tooHigh: endFrac < ALIGN_LO, target: TARGET };
+    return best;
+  }
+
+  // Coarse exhaustive search (half size, no scale) -> a few distinct peaks.
+  function globalPeaks(ref, live) {
+    const r = ref.c, l = live.c, peaks = [];
+    const tyMin = -Math.floor(r.h * (1 - MIN_OVERLAP)), tyMax = Math.ceil(r.h * 0.12);
+    for (let ty = tyMin; ty <= tyMax; ty++) {
+      let b = { score: -2 };
+      for (let tx = -DRIFT_C; tx <= DRIFT_C; tx++) {
+        const sc = nccAt(r, l, 1, tx, ty, 1);
+        if (sc > b.score) b = { score: sc, tx: 2 * tx, ty: 2 * ty };
+      }
+      peaks.push(b);
+    }
+    peaks.sort((a, b) => b.score - a.score);
+    const out = [];
+    for (const p of peaks) {
+      if (out.length >= 3) break;
+      if (out.every((q) => Math.abs(q.ty - p.ty) >= 6)) out.push(p);
+    }
+    return out;
+  }
+
+  // Where does the previous section end in the live view?
+  // `prior` = last tracked pose {s, tx, ty, vy} (fine-level pixels). Tracking
+  // starts from "not moved" right after a capture, so each step only has to
+  // follow a small motion (no confusing one printed line for the next); a full
+  // search re-acquires when the track is lost.
+  // endFrac = where the previous section ends, as a fraction of the live frame
+  // height (1.0 = not moved yet; TARGET = right overlap).
+  function matchRef(ref, live, prior) {
+    if (!ref.c || ref.h < 8 || live.h < 8) return { found: false, reason: "small" };
+    // texture check on the bottom strip: that's what must overlap at the end
+    const ps = Math.floor(ref.h * (1 - STRIP));
+    let m0 = 0, v0 = 0, cnt = 0;
+    for (let i = ps * ref.w; i < ref.h * ref.w; i++) { m0 += ref.g[i]; cnt++; }
+    m0 /= cnt;
+    for (let i = ps * ref.w; i < ref.h * ref.w; i++) { const d = ref.g[i] - m0; v0 += d * d; }
+    if (Math.sqrt(v0 / cnt) < 3) return { found: false, reason: "blank" };   // blank paper: nothing to lock onto
+
+    let local = null;
+    if (prior) {
+      const pred = { ty: prior.ty + (prior.vy || 0), tx: prior.tx };
+      const ds = [-0.02, -0.01, 0, 0.01, 0.02].map((d) => prior.s + d).map((s) => Math.min(1.15, Math.max(0.85, s)));
+      // translation first on a sparse grid, then scale around the best spot
+      const t = refine(ref, live, pred, 6 + Math.min(10, Math.abs(Math.round(prior.vy || 0))), 3, [prior.s], 2, PULL);
+      local = refine(ref, live, t, 1, 1, ds);
+    }
+    let best = local;
+    if (!local || local.score < 0.8) {
+      // track weak or missing: full search, refine its peaks
+      for (const p of globalPeaks(ref, live)) {
+        if (p.score < MIN_SCORE - 0.15) continue;
+        const r = refine(ref, live, p, 2, 2, [0.95, 1, 1.05]);
+        // a far-away match must clearly beat a usable local track
+        const margin = local && local.score >= MIN_SCORE ? 0.08 : 0;
+        if (!best || r.score > best.score + margin) best = r;
+      }
+    }
+    if (!best || best.score < MIN_SCORE) return { found: false, reason: "lost", score: best ? best.score : -1 };
+    // sub-pixel row offset from a parabola through the neighbouring scores
+    const sU = nccAt(ref, live, best.s, best.tx, best.ty - 1, 2), sD = nccAt(ref, live, best.s, best.tx, best.ty + 1, 2);
+    const den = sU - 2 * best.score + sD;
+    const sub = den < 0 ? Math.max(-0.5, Math.min(0.5, 0.5 * (sU - sD) / den)) : 0;
+    const ty = best.ty + sub;
+    const endFrac = (best.s * ref.h + ty) / live.h;
+    return { found: true, score: best.score, endFrac, aligned: endFrac >= ALIGN_LO && endFrac <= ALIGN_HI,
+             tooHigh: endFrac < ALIGN_LO, target: TARGET, drift: best.tx / live.w, scale: best.s,
+             pose: { s: best.s, tx: best.tx, ty, vy: prior ? ty - prior.ty : 0 } };
   }
 
   Scanner._reduce = reduce;      // exposed for tests

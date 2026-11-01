@@ -148,7 +148,7 @@ legend { padding: 0; margin-bottom: .3rem; font: 500 10px/1.4 var(--mono); text-
 .doc-box { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
 .doc-box polygon { fill: rgba(242,240,233,.10); stroke: #f2f0e9; stroke-width: 2.5; stroke-linejoin: round; transition: fill .2s, stroke .2s; }
 .doc-box.ready polygon { fill: rgba(61,255,134,.16); stroke: #3dff86; stroke-width: 3; }
-.ghost { position: absolute; left: 0; right: 0; top: 0; height: 25%; opacity: .62; background-size: 100% 100%; background-repeat: no-repeat;
+.ghost { position: absolute; left: 0; right: 0; top: 0; height: 25%; opacity: .62; transition: top .12s linear, height .12s linear; transform-origin: 50% 50%; background-size: 100% 100%; background-repeat: no-repeat;
   filter: contrast(1.25) saturate(0); outline: 1px solid rgba(232,176,74,.6); mix-blend-mode: normal; }
 .target-mark { position: absolute; left: -10px; right: -10px; top: 25%; height: 0; border-top: 2px dashed #e8b04a; }
 .target-mark span { position: absolute; right: 10px; top: 4px; font: 500 9px var(--mono); letter-spacing: .1em; color: #070808; background: #e8b04a; padding: 2px 5px; }
