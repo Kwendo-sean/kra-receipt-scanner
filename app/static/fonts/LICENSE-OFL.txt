@@ -1,0 +1,3 @@
+DM Sans (Colophon Foundry / Google) and IBM Plex Mono (IBM) are licensed under the
+SIL Open Font License 1.1: https://openfontlicense.org
+Bundled locally so the UI works without internet on the Pi hotspot.

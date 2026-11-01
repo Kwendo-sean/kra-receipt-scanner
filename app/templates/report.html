@@ -10,13 +10,14 @@
 {% endif %}
 <article class="report">
   <header class="report-head">
+    <div class="eyebrow"><span class="accent">●</span> / Report · computed in Python</div>
     <h1>{{ rep.title }}</h1>
     <p class="sub">{{ rep.subtitle }}</p>
     <p class="meta">Generated {{ rep.generated }} · {{ rep.prose_summary }}</p>
   </header>
   {% for s in rep.sections %}
   <section class="card">
-    <h2>{{ s.heading }}</h2>
+    <div class="card-head"><h2>{{ s.heading }}</h2><span class="section-code">{{ '%02d' % loop.index }}</span></div>
     {% if s.prose %}
       {% if s.prose_status == 'raw' %}
         <pre class="ocr">{{ s.prose }}</pre>

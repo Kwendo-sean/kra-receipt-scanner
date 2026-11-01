@@ -136,10 +136,18 @@ The reference rate table can be edited in Settings.
 
 ## 7. Email
 
+- **Layout:** phones get the camera scanner. Laptops and desktops get a dashboard (overview, receipts table, photo upload) without the camera. To switch, use **Settings → Layout**.
 - Add your address under **Settings → Email recipients**. The SMTP account in `.env` is confirmed automatically. Any other address receives a 6-digit code to confirm before it can receive mail.
 - On the **Email** tab, choose the receipts (a month, selected receipts, or everything, optionally filtered by supplier or "claimable only"). Then choose what to include: PDF, XLSX, CSV, original photos (zipped), the stitched image, and raw OCR text.
 - Emails wait in the **outbox** until the Pi is online, and are retried with exponential backoff (1 minute up to 6 hours, at most 12 tries). Large sets are split into several emails under 20 MB each.
 - **Monthly auto-email:** between the 1st and the 5th of each month, last month's VAT schedule and compliance report (PDF and XLSX) are queued for every confirmed address. You can turn this off in Settings.
+
+**If email says "not configured":**
+1. Run `.venv/bin/python scripts/check_smtp.py --send` on the Pi. It shows what the app can read from `.env` (the password is shown only as its length), tries a real login, and sends a test email to yourself.
+2. Restart both services after editing `.env`: `sudo systemctl restart receipt-app receipt-worker`.
+3. For Gmail, use a 16-letter **App Password**; your normal password won't work. Spaces in it are fine.
+
+On a paired device, **Settings → Email** shows the same diagnosis, with a **Send test email** button.
 
 ## 8. Development (laptop, no Pi needed)
 

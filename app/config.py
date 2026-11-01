@@ -76,7 +76,8 @@ class Settings:
     smtp_host: str = field(default_factory=lambda: _env("RS_SMTP_HOST", "smtp.gmail.com"))
     smtp_port: int = field(default_factory=lambda: _int("RS_SMTP_PORT", 587))
     smtp_user: str = field(default_factory=lambda: _env("RS_SMTP_USER", ""))
-    smtp_password: str = field(default_factory=lambda: _env("RS_SMTP_PASSWORD", ""), repr=False)
+    # Gmail shows App Passwords as "abcd efgh ijkl mnop"; the spaces are not part of it
+    smtp_password: str = field(default_factory=lambda: "".join(_env("RS_SMTP_PASSWORD", "").split()), repr=False)
     smtp_from: str = field(default_factory=lambda: _env("RS_SMTP_FROM", ""))
     email_max_bytes: int = field(default_factory=lambda: _int("RS_EMAIL_MAX_BYTES", 20 * 1024 * 1024))
 

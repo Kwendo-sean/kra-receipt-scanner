@@ -69,19 +69,26 @@
   });
 
   // ---------------------------------------------------------------- router
-  const views = ["scan", "receipts", "reports", "email", "settings"];
-  let current = "scan";
+  // Phones get the camera scanner; laptops get the dashboard and never touch the camera.
+  const IS_PHONE = !!window.__isPhone;
+  const views = IS_PHONE ? ["scan", "receipts", "reports", "email", "settings"]
+    : ["overview", "receipts", "reports", "email", "settings"];
+  let current = null;
   function show(view) {
+    if (!views.includes(view)) view = views[0];
     current = view;
-    for (const v of views) $("#view-" + v).classList.toggle("hidden", v !== view);
-    $$(".tabbar button").forEach((b) => { if (b.dataset.view !== view) b.removeAttribute("aria-current"); else b.setAttribute("aria-current", "page"); });
-    if (view === "scan") startCamera(); else stopCamera();
+    for (const v of ["scan", "overview", "receipts", "reports", "email", "settings"]) $("#view-" + v).classList.toggle("hidden", v !== view);
+    $$("[data-view]").forEach((b) => { if (b.dataset.view !== view) b.removeAttribute("aria-current"); else b.setAttribute("aria-current", "page"); });
+    if (IS_PHONE && view === "scan") startCamera(); else stopCamera();
+    if (view === "overview") loadOverview();
     if (view === "receipts") loadReceipts();
     if (view === "reports") loadReports();
     if (view === "email") loadEmail();
     if (view === "settings") loadSettings();
+    window.scrollTo(0, 0);
+    if (location.hash.slice(1) !== view) history.replaceState(null, "", "#" + view);
   }
-  $$(".tabbar button").forEach((b) => b.addEventListener("click", () => show(b.dataset.view)));
+  $$("[data-view]").forEach((b) => b.addEventListener("click", () => show(b.dataset.view)));
 
   // ================================================================ SCAN
   const scan = {
@@ -94,6 +101,10 @@
       m.firstElementChild.style.width = Math.min(100, (sharp / (threshold * 2)) * 100) + "%";
       m.classList.toggle("ok", isSharp);
       $("#guide").classList.toggle("sharp", isSharp && stable);
+      $("#hud-sharp").textContent = (sharp / threshold).toFixed(2);
+      $("#hud-steady").textContent = stable ? "LOCKED" : "MOVING";
+      $("#hud-dot").classList.toggle("ok", isSharp && stable);
+      $("#guide-tag").textContent = isSharp && stable ? "SHARP · STEADY" : isSharp ? "HOLD STEADY" : "ALIGN RECEIPT";
       if (scan.busy) return;
       const waiting = scan.mode === "multi" && !scanner.armed;
       $("#hint").textContent = waiting ? "Tap “Next section”, slide down so ~25% overlaps, hold steady"
@@ -205,6 +216,7 @@
       el("button", { type: "button", class: "thumb" + (f.state === "uploading" ? " uploading" : ""),
         "aria-label": `Section ${i + 1}`, onclick: () => thumbMenu(f) },
         el("img", { src: f.url, alt: "" }), el("b", { text: f.state === "failed" ? "!" : String(i + 1) }))));
+    $("#hud-sections").textContent = String(scan.frames.length);
     updateScanButtons();
   }
 
@@ -245,6 +257,7 @@
     if (!watching.size) { $("#queue").replaceChildren(); return; }
     try {
       const q = await api("GET", "/api/queue");
+      $("#hud-queue").textContent = String(q.jobs_pending);
       const rows = q.receipts.filter((r) => watching.has(r.id));
       $("#queue").replaceChildren(...rows.slice(0, 4).map((r) => {
         const label = r.status === "done" ? `#${r.id} ${r.seller_name || "Receipt"} · KES ${kes(r.total)} · tap to check`
@@ -435,14 +448,8 @@
     const month = $("#f-month").value, sup = $("#f-supplier").value.trim().toLowerCase();
     if (month) list = list.filter((r) => (r.receipt_date || "").startsWith(month));
     if (sup) list = list.filter((r) => (r.seller_name || "").toLowerCase().includes(sup));
-    let claimMap = null;
-    if ($("#f-claimable").checked) {
-      claimMap = new Set();
-      await Promise.all(list.filter((r) => r.status === "done").map(async (r) => {
-        try { const d = await api("GET", `/api/receipts/${r.id}`); if (d.claim && d.claim.claimable) claimMap.add(r.id); } catch (e) { /* skip */ }
-      }));
-      list = list.filter((r) => claimMap.has(r.id));
-    }
+    if ($("#f-claimable").checked) list = list.filter((r) => r.claimable === true);
+    if (!IS_PHONE) { renderReceiptTable(list); updateSel(); return; }
     const ul = $("#receipt-list");
     ul.replaceChildren(...(list.length ? list.map((r) => {
       const pill = r.status === "done" ? null : el("span", { class: "pill " + (r.status === "failed" ? "bad" : "warn"), text: r.status });
@@ -454,6 +461,109 @@
         el("div", { class: "amount" }, el("div", { text: kes(r.total) }), el("div", { class: "small muted", text: r.vat !== null && r.vat !== undefined ? "VAT " + kes(r.vat) : "no VAT" }))));
     }) : [el("li", { class: "muted", text: "No receipts yet: scan one!" })]));
     updateSel();
+  }
+
+  function claimPill(r) {
+    if (r.status !== "done") return el("span", { class: "pill " + (r.status === "failed" ? "bad" : "warn"), text: r.status });
+    return el("span", { class: "pill " + (r.claimable ? "ok" : "bad"), title: (r.issues || []).join(" · "), text: r.claimable ? "Claimable" : "Not claimable" });
+  }
+
+  function renderReceiptTable(list) {
+    const head = el("thead", {}, el("tr", {}, selecting ? el("th") : null,
+      ["#", "Date", "Supplier", "KRA PIN", "Category"].map((c) => el("th", { text: c })),
+      el("th", { class: "num", text: "Total (KES)" }), el("th", { class: "num", text: "VAT (KES)" }), el("th", { text: "Status" })));
+    const rows = list.map((r) => {
+      const cb = selecting ? el("input", { type: "checkbox", checked: selected.has(r.id), "aria-label": "Select receipt",
+        onclick: (e) => e.stopPropagation(), onchange: (e) => { e.target.checked ? selected.add(r.id) : selected.delete(r.id); updateSel(); } }) : null;
+      return el("tr", { class: "click", onclick: () => selecting ? (cb.checked = !cb.checked, cb.dispatchEvent(new Event("change"))) : openReceipt(r.id) },
+        selecting ? el("td", {}, cb) : null,
+        el("td", { class: "mono small muted", text: String(r.id).padStart(4, "0") }),
+        el("td", { class: "mono small", text: r.receipt_date || "—" }),
+        el("td", { text: r.seller_name || "(unknown)" }),
+        el("td", { class: "mono small" + (r.seller_pin ? "" : " bad"), text: r.seller_pin || (r.status === "done" ? "MISSING" : "—") }),
+        el("td", { class: "muted", text: r.category || "—" }),
+        el("td", { class: "num", text: kes(r.total) }),
+        el("td", { class: "num", text: r.vat === null || r.vat === undefined ? "—" : kes(r.vat) }),
+        el("td", {}, claimPill(r)));
+    });
+    $("#receipt-table").replaceChildren(head, el("tbody", {}, rows.length ? rows
+      : el("tr", {}, el("td", { colspan: 9, class: "empty", text: "No receipts yet. Scan with your phone, or upload photos." }))));
+  }
+
+  // ---------------------------------------------------------------- desktop upload (no camera)
+  async function toJpeg(file) {
+    if (file.type === "image/jpeg") return file;
+    const bmp = await createImageBitmap(file);
+    const c = document.createElement("canvas");
+    c.width = bmp.width; c.height = bmp.height;
+    c.getContext("2d").drawImage(bmp, 0, 0);
+    return await new Promise((res) => c.toBlob(res, "image/jpeg", 0.92));
+  }
+  async function uploadReceipt(files, mode) {
+    const rid = (await api("POST", "/api/receipts", { mode })).id;
+    for (let i = 0; i < files.length; i++) {
+      const fd = new FormData();
+      fd.append("file", await toJpeg(files[i]), `frame${i}.jpg`);
+      fd.append("idx", String(i));
+      await api("POST", `/api/receipts/${rid}/frames`, fd, true);
+    }
+    await api("POST", `/api/receipts/${rid}/submit`, { ocr_mode: "auto" });
+    return rid;
+  }
+  $("#upload-input").addEventListener("change", async (e) => {
+    const files = Array.from(e.target.files || []).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    e.target.value = "";
+    if (!files.length) return;
+    const long = $("#upload-long").checked;
+    try {
+      toast(`Uploading ${files.length} photo(s)…`, 60000);
+      if (long) await uploadReceipt(files, files.length > 1 ? "multi" : "single");
+      else for (const f of files) await uploadReceipt([f], "single");
+      toast(long ? "Uploaded as one receipt: reading now" : `${files.length} receipt(s) queued for reading`);
+      loadReceipts();
+      setTimeout(loadReceipts, 8000);
+    } catch (err) { toast("Upload failed: " + err.message, 5000); }
+  });
+
+  // ================================================================ OVERVIEW (desktop)
+  $("#ov-month").value = thisMonth();
+  $("#ov-month").addEventListener("change", loadOverview);
+  $("#ov-report").addEventListener("click", async () => {
+    try { await api("POST", "/api/reports", { kind: "vat_schedule", params: { period: $("#ov-month").value } }); toast("VAT schedule queued"); show("reports"); }
+    catch (e) { toast(e.message); }
+  });
+  function stat(label, value, sub, cls) {
+    return el("div", { class: "stat " + (cls || "") }, el("div", { class: "label", text: label }),
+      el("div", { class: "value" }, value), sub ? el("div", { class: "sub", text: sub }) : null);
+  }
+  async function loadOverview() {
+    let o;
+    try { o = await api("GET", "/api/overview?period=" + encodeURIComponent($("#ov-month").value || thisMonth())); } catch (e) { toast(e.message); return; }
+    $("#ov-title").textContent = o.label;
+    const kesV = (v) => [kes(v), el("small", { text: "KES" })];
+    $("#ov-stats").replaceChildren(
+      stat("Spent", kesV(o.spent), `${o.receipts} receipt(s)`),
+      stat("VAT paid", kesV(o.vat_paid), "as printed"),
+      stat("Claimable input VAT", kesV(o.claimable_vat), `${o.claimable} of ${o.receipts} receipts`, "ok"),
+      stat("VAT3 due", o.due || "—", o.days_to_due === null ? "" : o.days_to_due >= 0 ? `${o.days_to_due} day(s) left` : `${-o.days_to_due} day(s) ago`, o.days_to_due !== null && o.days_to_due <= 5 ? "accent" : ""));
+    $("#ov-verdict").textContent = o.receipts === 0
+      ? `No receipts recorded for ${o.label}. A nil VAT3 return is still due by ${o.due}.`
+      : `${o.claimable} of ${o.receipts} receipts support an input-VAT claim of KES ${kes(o.claimable_vat)}. ` +
+        (o.issues ? `${o.issues} need attention, leaving KES ${kes(o.at_risk_vat)} of printed VAT unclaimable for now. ` : "Every receipt passes the claim rules. ") +
+        `File by ${o.due}.`;
+    $("#ov-issues-n").textContent = `${o.issues} RECEIPT(S)`;
+    $("#ov-issues").replaceChildren(el("thead", {}, el("tr", {}, ["Date", "Supplier", "Issue"].map((c) => el("th", { text: c })))),
+      el("tbody", {}, o.issue_rows.length ? o.issue_rows.map((r) => el("tr", {}, el("td", { class: "mono small", text: r[0] || "—" }), el("td", { text: r[1] }),
+        el("td", {}, el("div", { text: r[2] }), el("div", { class: "small muted", text: r[3] }))))
+        : el("tr", {}, el("td", { colspan: 3, class: "empty", text: "Nothing to fix." }))));
+    const max = Math.max(1, ...o.top_suppliers.map((s) => s[1]));
+    $("#ov-suppliers").replaceChildren(...(o.top_suppliers.length ? o.top_suppliers.map((s) => el("li", {},
+      el("div", { class: "main" }, el("div", { class: "title", text: s[0] }), el("div", { class: "bar" }, (() => { const i = el("i"); i.style.width = `${(s[1] / max) * 100}%`; return i; })())),
+      el("div", { class: "amount", text: kes(s[1]) }))) : [el("li", { class: "muted", text: "No spending yet." })]));
+    const rates = Object.entries(o.by_rate).sort((a, b) => Number(b[0]) - Number(a[0]));
+    $("#ov-rates").replaceChildren(...(rates.length ? rates.map(([rate, v]) => el("li", {},
+      el("div", { class: "main mono small", text: `${Number(rate)}%` }), el("div", { class: "amount" }, el("div", { text: kes(v[1]) }),
+        el("div", { class: "small muted", text: "on " + kes(v[0]) })))) : [el("li", { class: "muted", text: "—" })]));
   }
   function updateSel() {
     $("#sel-bar").classList.toggle("hidden", !selecting);
@@ -564,6 +674,7 @@
       el("li", {}, el("div", { class: "main", text: "Email (SMTP)" }), el("span", { class: "pill " + (st.smtp_configured ? "ok" : "bad"), text: st.smtp_configured ? "configured" : "not configured" })),
       el("li", {}, el("div", { class: "main", text: "Jobs in queue" }), el("span", { class: "pill", text: String(st.jobs_pending) })),
       el("li", {}, el("div", { class: "main", text: "Version" }), el("span", { class: "pill", text: st.version })));
+    renderSmtp(st.smtp);
     $("#recipient-list").replaceChildren(...rec.recipients.map((r) => el("li", {},
       el("div", { class: "main" }, el("div", { class: "title", text: r.email })),
       el("span", { class: "pill " + (r.confirmed ? "ok" : "warn"), text: r.confirmed ? "confirmed" : "awaiting code" }),
@@ -572,7 +683,7 @@
     $("#auto-monthly").checked = !!(s.auto_monthly && s.auto_monthly.enabled);
     $("#categories").value = s.categories.join("\n");
     $("#session-list").replaceChildren(...s.sessions.map((x) => el("li", {},
-      el("div", { class: "main" }, el("div", { class: "title", text: (x.label || "Device") + (x.current ? " (this phone)" : "") }),
+      el("div", { class: "main" }, el("div", { class: "title", text: (x.label || "Device") + (x.current ? " (this device)" : "") }),
         el("div", { class: "small muted", text: "Last seen " + when(x.last_seen) })),
       x.current ? null : el("button", { class: "btn small danger", type: "button", onclick: async () => { await api("DELETE", `/api/sessions/${encodeURIComponent(x.id)}`); loadSettings(); } }, "Revoke"))));
     // rates
@@ -625,9 +736,47 @@
     location.href = "/";
   });
 
+  function renderSmtp(m) {
+    const ok = !m.missing.length;
+    $("#smtp-code").textContent = ok ? "CONFIGURED" : "NOT CONFIGURED";
+    const kv = [["Server", `${m.host}:${m.port}`], ["Login", m.user || "MISSING"], ["Sends as", m.from || "MISSING"],
+      ["App password", m.password_set ? `set (${m.password_len} characters${m.host.endsWith("gmail.com") && m.password_len !== 16 ? " — Gmail app passwords have 16" : ""})` : "MISSING"]];
+    $("#smtp-kv").replaceChildren(...kv.flatMap(([k, v]) => [el("dt", { text: k }), el("dd", { class: v === "MISSING" ? "missing" : "", text: v })]));
+    $("#smtp-test").disabled = !ok;
+  }
+  $("#smtp-test").addEventListener("click", async () => {
+    const out = $("#smtp-result");
+    out.textContent = "Sending…";
+    try { const j = await api("POST", "/api/email/test"); out.textContent = "Sent to " + j.sent_to + ". Check your inbox."; loadSettings(); }
+    catch (e) { out.textContent = e.message; }
+  });
+  $("#mode-toggle").textContent = "Layout: " + (IS_PHONE ? "phone" : "desktop");
+  $("#mode-toggle").addEventListener("click", () => {
+    try { localStorage.setItem("device-mode", IS_PHONE ? "desk" : "phone"); } catch (e) { /* ignore */ }
+    location.reload();
+  });
+
+  // sidebar status (desktop)
+  async function sideStatus() {
+    if (IS_PHONE) return;
+    try {
+      const st = await api("GET", "/api/status");
+      $("#st-llm").classList.toggle("ok", st.llm);
+      $("#st-smtp").classList.toggle("ok", st.smtp_configured);
+      $("#brand-dot").classList.toggle("ok", st.llm && st.smtp_configured);
+      $("#st-queue").classList.toggle("ok", st.jobs_pending === 0);
+      $("#st-queue-txt").textContent = st.jobs_pending ? `${st.jobs_pending} job(s) running` : "Queue idle";
+    } catch (e) { /* ignore */ }
+  }
+  setInterval(sideStatus, 15000);
+
   // ---------------------------------------------------------------- boot
   api("GET", "/api/settings").then((s) => { window.__settings = s; }).catch(() => {});
   updateScanButtons();
-  if (new URLSearchParams(location.search).get("paired")) { toast("Phone paired: point it at a receipt"); history.replaceState(null, "", "/"); }
-  show("scan");
+  if (new URLSearchParams(location.search).get("paired")) {
+    toast(IS_PHONE ? "Phone paired: point it at a receipt" : "Paired: this computer can view and manage receipts");
+    history.replaceState(null, "", "/");
+  }
+  sideStatus();
+  show(location.hash.slice(1) || views[0]);
 })();

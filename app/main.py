@@ -451,6 +451,59 @@ async def send_email(request: Request, sess: dict = Depends(require_session)):
     return {"job": job}
 
 
+@app.post("/api/email/test")
+def email_test(sess: dict = Depends(require_session)):
+    """Send one test email to the configured account right now and report exactly what failed."""
+    import smtplib
+    from email.message import EmailMessage
+    info = emailer.smtp_info()
+    if info["missing"]:
+        raise HTTPException(400, "SMTP not configured: set " + ", ".join(info["missing"]) +
+                            " in .env on the Pi, then restart receipt-app and receipt-worker")
+    if not emailer.online():
+        raise HTTPException(503, f"Cannot reach {info['host']}:{info['port']}; is the Pi online?")
+    m = EmailMessage()
+    m["From"] = info["from"]
+    m["To"] = info["from"]
+    m["Subject"] = "Receipt scanner: test email"
+    m.set_content("SMTP works. Queued reports will now be delivered automatically.")
+    try:
+        emailer._smtp_send(m)
+    except smtplib.SMTPAuthenticationError as e:
+        raise HTTPException(400, emailer._scrub(
+            f"Login refused ({e.smtp_code}). For Gmail use a 16-character App Password, not your normal password."))
+    except (OSError, smtplib.SMTPException) as e:
+        raise HTTPException(502, emailer._scrub(f"{type(e).__name__}: {e}"))
+    emailer.ensure_owner_recipient()
+    return {"ok": True, "sent_to": info["from"]}
+
+
+@app.get("/api/overview")
+def overview(period: str | None = None, sess: dict = Depends(require_session)):
+    """Desktop dashboard figures for one month - all computed, no model."""
+    period = period or date.today().strftime("%Y-%m")
+    try:
+        receipts.query(period=period, status=None)
+    except receipts.ValidationError as e:
+        raise _bad(e)
+    today = date.today()
+    vs = reports.vat_schedule({"period": period}, today, use_llm=False)
+    co = reports.compliance({"period": period}, today, use_llm=False)
+    sp = reports.spending({"period": period}, today, use_llm=False)
+    sup = next(s for s in sp["sections"] if s["heading"] == "By supplier")["tables"][0]["rows"][:5]
+    issues = next(s for s in co["sections"] if s["heading"] == "Receipts that need attention")["tables"][0]["rows"][:8]
+    due = vs["data"]["due"]
+    return {
+        "period": period, "label": vs["subtitle"],
+        "receipts": sp["data"]["n"], "spent": sp["data"]["total"], "vat_paid": sp["data"]["vat"],
+        "claimable_vat": vs["data"]["claimable_vat"], "claimable": vs["data"]["n_claimable"],
+        "issues": co["data"]["n_issues"], "closing_soon": co["data"]["closing_soon"],
+        "at_risk_vat": co["data"]["at_risk_vat"], "due": due,
+        "days_to_due": (date.fromisoformat(due) - today).days if due else None,
+        "by_rate": vs["data"]["by_rate"], "top_suppliers": sup, "issue_rows": issues,
+    }
+
+
 @app.get("/api/outbox")
 def get_outbox(sess: dict = Depends(require_session)):
     jobs = db.all_("SELECT id, status, error, created_at FROM jobs WHERE kind='email' ORDER BY id DESC LIMIT 10")
@@ -509,6 +562,7 @@ def status(sess: dict = Depends(require_session)):
     return {
         "llm": llm.available(timeout=1.5),
         "smtp_configured": bool(s.smtp_user and s.smtp_password),
+        "smtp": emailer.smtp_info(),
         "jobs_pending": db.one("SELECT COUNT(*) AS n FROM jobs WHERE status IN ('queued','running')")["n"],
         "outbox_queued": db.one("SELECT COUNT(*) AS n FROM outbox WHERE status IN ('queued','sending')")["n"],
         "today": date.today().isoformat(),

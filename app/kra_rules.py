@@ -192,8 +192,12 @@ def assess(receipt: dict, today: date) -> Claimability:
             warnings.append(f"Claim window closes on {deadline.isoformat()}")
     else:
         reasons.append("Receipt date missing")
+    # presence flags are already covered by the reasons above; only arithmetic checks add warnings
+    flags = {"pin_present", "etims_present", "vat_shown", "date_present", "total_present"}
     for c in receipt.get("checks", []) or []:
-        if not c.get("ok") and c.get("severity") == "error":
+        if c.get("id") in flags:
+            continue
+        if c.get("ok") is False and c.get("severity") == "error":
             warnings.append(f"Check failed: {c.get('label')}")
     return Claimability(not reasons, reasons, warnings, deadline)
 

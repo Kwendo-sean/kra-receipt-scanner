@@ -328,7 +328,17 @@ def query(period: str | None = None, date_from: str | None = None, date_to: str 
     return out
 
 
-def list_recent(limit: int = 50) -> list[dict]:
-    rows = db.all_("SELECT id, status, stage, error, receipt_date, seller_name, total, vat, created_at, category, mode "
-                   "FROM receipts WHERE deleted=0 ORDER BY id DESC LIMIT ?", limit)
-    return [dict(r) for r in rows]
+def list_recent(limit: int = 50, today: date | None = None) -> list[dict]:
+    rows = db.all_("SELECT id, status, stage, error, receipt_date, seller_name, seller_pin, total, vat, created_at, "
+                   "category, mode, parsed_json, corrections_json, kra_qr FROM receipts WHERE deleted=0 "
+                   "ORDER BY id DESC LIMIT ?", limit)
+    out = []
+    for r in rows:
+        d = {k: r[k] for k in r.keys() if k not in ("parsed_json", "corrections_json", "kra_qr")}
+        d["claimable"] = None
+        d["issues"] = []
+        if r["parsed_json"]:
+            c = rules.assess(effective(r), today or date.today())
+            d["claimable"], d["issues"] = c.claimable, c.reasons + c.warnings
+        out.append(d)
+    return out

@@ -4,49 +4,50 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Pair your phone</title>
+<meta name="theme-color" content="#070808">
+<title>Pair a device</title>
 <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body class="{{ 'kiosk' if kiosk }}">
 <main class="pair-page">
-  <div class="pair-card card">
-    <h1>KRA receipt scanner</h1>
+  <div class="pair-card">
+    <div class="brand"><span class="live-dot"></span><div>Receipts · Pi<small>KRA receipt intelligence</small></div></div>
     {% if error %}
+      <div class="eyebrow mt"><span class="accent">!</span> / Pairing failed</div>
+      <h1>Code not accepted</h1>
       <p class="error-box">{{ error }}</p>
-    {% endif %}
-    {% if show_qr %}
-      <p>Scan with your phone's camera to pair it as the scanner.</p>
+    {% elif show_qr %}
+      <div class="eyebrow mt"><span class="accent">00</span> / Pair · single use · {{ (ttl // 60) }} minutes</div>
+      <h1>Point. Capture. Claim.</h1>
+      <p class="muted">Scan with your phone's camera to open the receipt scanner.</p>
       <div class="qr-row">
         {% if wifi %}
-        <figure class="qr-box-wrap">
+        <figure>
           <div class="qr-box"><img src="/api/wifi/qr.svg" alt="Wi-Fi QR code"></div>
-          <figcaption class="small muted">1 · Join the Pi's Wi-Fi</figcaption>
+          <figcaption class="eyebrow">01 · Join the Pi's Wi-Fi</figcaption>
         </figure>
         {% endif %}
-        <figure class="qr-box-wrap">
+        <figure>
           <div class="qr-box"><img id="pair-qr" alt="Pairing QR code"></div>
-          <figcaption class="small muted">{{ '2 · ' if wifi }}Open the scanner · <span id="pair-countdown"></span></figcaption>
+          <figcaption class="eyebrow">{{ '02 · ' if wifi }}Open the scanner · <span id="pair-countdown"></span></figcaption>
         </figure>
       </div>
-      <p class="small muted">Each code works once and expires after {{ (ttl // 60) }} minutes; a new one appears automatically.</p>
-      <div class="steps small">
-        <p><b>First time on this phone?</b> Camera access needs HTTPS that your phone trusts.
-          Download and install the <a href="/ca.crt">Pi's certificate</a> once (see the README for Android and iPhone steps),
-          then scan the code again.</p>
+      <div class="steps small muted">
+        First time on this phone? Camera access needs HTTPS the phone trusts: install the
+        <a href="/ca.crt">Pi's certificate</a> once (README has Android and iPhone steps), then scan again.
       </div>
-      <script src="/static/pair.js" data-ttl="{{ ttl }}" id="pair-script"></script>
+      <script src="/static/pair.js"></script>
     {% else %}
-      <p>This browser is not paired.</p>
-      <div class="steps">
-        <p>To pair a phone, show a pairing QR code using one of:</p>
-        <ul>
-          <li>the Pi's own screen: open <code>https://localhost:8090/pair-screen</code></li>
-          <li>over SSH: <code>python -m app.pair_cli</code></li>
-          <li>an already paired phone: <b>Settings → Pair another phone</b></li>
-        </ul>
-        <p class="small muted">First time? Install the <a href="/ca.crt">Pi's certificate</a> on this phone (see README).</p>
-      </div>
+      <div class="eyebrow mt"><span class="accent">00</span> / Not paired</div>
+      <h1>This device isn't paired yet</h1>
+      <p class="muted">Show a pairing code with one of these, then scan it (phone) or open its link (computer):</p>
+      <ul class="steps">
+        <li>Over SSH on the Pi: <code>.venv/bin/python -m app.pair_cli</code></li>
+        <li>On a screen attached to the Pi: <code>https://localhost:8090/pair-screen</code></li>
+        <li>On a paired device: <b>Settings → Pair another phone</b></li>
+      </ul>
+      <p class="small muted">First time? Install the <a href="/ca.crt">Pi's certificate</a> (see README).</p>
     {% endif %}
   </div>
 </main>

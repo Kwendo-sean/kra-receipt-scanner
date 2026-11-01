@@ -36,6 +36,14 @@ def _hash_code(code: str) -> str:
     return hmac.new(config.settings.get_secret_key(), code.encode(), hashlib.sha256).hexdigest()
 
 
+def smtp_info() -> dict:
+    """What the running process sees (never the password itself)."""
+    s = config.settings
+    missing = [k for k, v in (("RS_SMTP_USER", s.smtp_user), ("RS_SMTP_PASSWORD", s.smtp_password)) if not v]
+    return {"host": s.smtp_host, "port": s.smtp_port, "user": s.smtp_user, "from": s.smtp_from or s.smtp_user,
+            "password_set": bool(s.smtp_password), "password_len": len(s.smtp_password), "missing": missing}
+
+
 # ------------------------------------------------------------------ recipients
 
 

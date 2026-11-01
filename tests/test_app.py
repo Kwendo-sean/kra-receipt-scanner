@@ -357,3 +357,42 @@ def test_monthly_auto_email_once(client, tmp_settings, monkeypatch):
     assert worker.monthly_auto(date(2026, 11, 3)) is None  # already done this month
     job = db.one("SELECT payload_json FROM jobs WHERE kind='email'")
     assert db.jload(job["payload_json"])["params"] == {"period": "2026-10"}
+
+
+# ------------------------------------------------------------------ desktop dashboard / SMTP diagnostics
+
+
+def test_overview_and_list_claimable(client):
+    csrf = _pair(client)
+    _three_receipts(client, csrf)
+    o = client.get("/api/overview?period=2026-10").json()
+    assert o["receipts"] == 2 and o["claimable"] == 2
+    assert o["claimable_vat"] == pytest.approx(264.82) and o["due"] == "2026-11-20"
+    assert client.get("/api/overview?period=bad").status_code == 400
+    rows = client.get("/api/receipts").json()["receipts"]
+    kiosk = [r for r in rows if r["seller_name"] == "MAMA WANJIKU KIOSK"][0]
+    assert kiosk["claimable"] is False and "Supplier KRA PIN not printed" in kiosk["issues"]
+    assert "parsed_json" not in kiosk
+
+
+def test_smtp_status_and_test_endpoint(client, tmp_settings, monkeypatch):
+    from app import emailer
+    csrf = _pair(client)
+    st = client.get("/api/status").json()["smtp"]
+    assert st["missing"] == ["RS_SMTP_USER", "RS_SMTP_PASSWORD"] and "password" not in st
+    r = client.post("/api/email/test", headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 400 and "RS_SMTP_USER" in r.json()["detail"]
+    monkeypatch.setattr(tmp_settings, "smtp_user", "me@gmail.com")
+    monkeypatch.setattr(tmp_settings, "smtp_password", "abcdefghijklmnop")
+    monkeypatch.setattr(emailer, "online", lambda timeout=4.0: True)
+    sent = []
+    monkeypatch.setattr(emailer, "_smtp_send", lambda m: sent.append(m))
+    r = client.post("/api/email/test", headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 200 and sent[0]["To"] == "me@gmail.com"
+    assert any(x["email"] == "me@gmail.com" and x["confirmed"] for x in emailer.list_recipients())
+
+
+def test_gmail_app_password_spaces_removed(monkeypatch):
+    from app import config
+    monkeypatch.setenv("RS_SMTP_PASSWORD", "abcd efgh ijkl mnop")
+    assert config.Settings().smtp_password == "abcdefghijklmnop"
