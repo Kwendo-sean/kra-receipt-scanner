@@ -64,8 +64,8 @@ class Settings:
     # Local LLM (llama-server, OpenAI-compatible)
     llm_url: str = field(default_factory=lambda: _env("RS_LLM_URL", "http://127.0.0.1:8081/v1"))
     llm_model: str = field(default_factory=lambda: _env("RS_LLM_MODEL", ""))
-    llm_timeout: int = field(default_factory=lambda: _int("RS_LLM_TIMEOUT", 60))
-    llm_max_tokens: int = field(default_factory=lambda: _int("RS_LLM_MAX_TOKENS", 256))
+    llm_timeout: int = field(default_factory=lambda: _int("RS_LLM_TIMEOUT", 150))
+    llm_max_tokens: int = field(default_factory=lambda: _int("RS_LLM_MAX_TOKENS", 400))
 
     # OCR
     ocr_threads: int = field(default_factory=lambda: _int("RS_OCR_THREADS", 2))

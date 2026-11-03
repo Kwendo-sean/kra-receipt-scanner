@@ -241,6 +241,51 @@ def test_report_html_escapes_model_and_receipt_text(client):
     assert "<img src=x" not in html and "&lt;img src=x" in html
 
 
+def test_reports_carry_figures_steps_and_comparison(client):
+    from app import reports
+    csrf = _pair(client)
+    _three_receipts(client, csrf)  # Oct: supermarket + quickmart, Nov: kiosk
+    rep = reports.build("narrative", {"period": "2026-11"}, today=date(2026, 11, 5), use_llm=False)
+    brief = rep["sections"][0]
+    assert [t[0] for t in brief["stats"]] == ["Spent", "VAT paid", "Claimable VAT", "Need attention"]
+    assert "less than October 2026" in brief["prose"]  # 250 vs 1,600 + 880, computed in Python
+    steps = next(s for s in rep["sections"] if s["heading"] == "Next steps")["bullets"]
+    assert steps[0].startswith("File the VAT3 return for November 2026 by 2026-12-20")
+    assert any("MAMA WANJIKU KIOSK" in s and "eTIMS" in s for s in steps)
+    sp = reports.build("spending", {"period": "2026-11"}, today=date(2026, 11, 5), use_llm=False)
+    assert sp["data"]["compare"]["change"] == pytest.approx(250 - 2480)
+
+
+def test_saved_html_report_is_self_contained(client):
+    from app import render, reports
+    csrf = _pair(client)
+    _three_receipts(client, csrf)
+    rep = reports.build("spending", {"period": "2026-10"}, today=date(2026, 11, 5), use_llm=False)
+    html = render.to_html(rep, embed=True)
+    assert "/static/app.css" not in html and "data:font/woff2;base64," in html and "--accent" in html
+    assert 'class="bar-fg" width="100.0"' in html  # largest supplier = full bar
+
+
+def test_clear_receipts_keeps_pairing_keys_and_recipients(client, tmp_settings):
+    import importlib.util
+    from pathlib import Path
+    from app import auth, db, emailer
+    csrf = _pair(client)
+    _three_receipts(client, csrf)
+    auth.create_api_key("iPhone")
+    emailer.add_recipient("me@example.com")
+    spec = importlib.util.spec_from_file_location("clear_receipts", Path(__file__).parent.parent / "scripts" / "clear_receipts.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.clear()["receipts"] == 3
+    assert db.one("SELECT COUNT(*) AS n FROM receipts")["n"] == 0
+    assert not any(tmp_settings.media_dir.iterdir())
+    assert db.one("SELECT COUNT(*) AS n FROM api_keys")["n"] == 1
+    assert db.one("SELECT COUNT(*) AS n FROM recipients")["n"] == 1
+    assert client.get("/api/receipts").status_code == 200  # still paired
+    assert _scan(client, csrf, synth.kiosk_no_vat().text) == 1  # numbering restarts
+
+
 def test_llm_prose_used_when_numbers_check(client, monkeypatch):
     from app import llm, reports
     csrf = _pair(client)

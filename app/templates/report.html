@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ rep.title }}</title>
-<link rel="stylesheet" href="/static/app.css">
+<title>{{ rep.title }} · {{ rep.subtitle }}</title>
+{% if css %}<style>{{ css | safe }}</style>{% else %}<link rel="stylesheet" href="/static/app.css">{% endif %}
 </head>
 <body class="report-page">
 {% endif %}
 <article class="report">
   <header class="report-head">
-    <div class="eyebrow"><span class="accent">●</span> / Report · computed in Python</div>
+    <div class="eyebrow"><span class="accent">●</span> / {{ {'vat_schedule': 'VAT3 purchases', 'compliance': 'Compliance', 'spending': 'Spending', 'receipt': 'Receipt', 'narrative': 'Monthly brief'}.get(rep.kind, 'Report') }} · computed in Python</div>
     <h1>{{ rep.title }}</h1>
     <p class="sub">{{ rep.subtitle }}</p>
     <p class="meta">Generated {{ rep.generated }} · {{ rep.prose_summary }}</p>
@@ -18,6 +18,11 @@
   {% for s in rep.sections %}
   <section class="card">
     <div class="card-head"><h2>{{ s.heading }}</h2><span class="section-code">{{ '%02d' % loop.index }}</span></div>
+    {% if s.stats %}
+    <div class="tiles">
+      {% for label, value, note in s.stats %}<div class="tile"><div class="label">{{ label }}</div><div class="tile-value">{{ value }}</div>{% if note %}<div class="tile-note">{{ note }}</div>{% endif %}</div>{% endfor %}
+    </div>
+    {% endif %}
     {% if s.prose %}
       {% if s.prose_status == 'raw' %}
         <pre class="ocr">{{ s.prose }}</pre>
@@ -29,6 +34,17 @@
           <p class="badge ok">Written by local model · numbers verified</p>
         {% endif %}
       {% endif %}
+    {% endif %}
+    {% for b in s.bars %}
+      {% if b.title %}<h3>{{ b.title }}</h3>{% endif %}
+      <ul class="bars">
+        {% for label, v, shown in b.rows %}
+        <li><span class="bar-label">{{ label }}</span><span class="bar-val">{{ shown }}</span><svg class="bar" viewBox="0 0 100 4" preserveAspectRatio="none" aria-hidden="true"><rect class="bar-bg" width="100" height="4"/><rect class="bar-fg" width="{{ v | barw(b.rows) }}" height="4"/></svg></li>
+        {% endfor %}
+      </ul>
+    {% endfor %}
+    {% if s.bullets %}
+    <ol class="next-steps">{% for b in s.bullets %}<li>{{ b }}</li>{% endfor %}</ol>
     {% endif %}
     {% if s.kv %}
     <dl class="kv">
@@ -42,7 +58,7 @@
         <thead><tr>{% for c in t.columns %}<th{% if loop.index0 in t.money_cols %} class="num"{% endif %}>{{ c }}</th>{% endfor %}</tr></thead>
         <tbody>
         {% for r in t.rows %}
-          <tr>{% for v in r %}<td class="{{ 'num' if loop.index0 in t.money_cols }}{{ ' bad' if v in ('MISSING', 'No', 'FAIL') }}">{{ v | cell(loop.index0 in t.money_cols) }}</td>{% endfor %}</tr>
+          <tr>{% for v in r %}<td class="{{ 'num' if loop.index0 in t.money_cols }}{{ ' bad' if v in ('MISSING', 'No', 'FAIL') }}{{ ' good' if v in ('Yes', 'PASS') }}">{{ v | cell(loop.index0 in t.money_cols) }}</td>{% endfor %}</tr>
         {% else %}
           <tr><td colspan="{{ t.columns|length }}" class="empty">No rows</td></tr>
         {% endfor %}

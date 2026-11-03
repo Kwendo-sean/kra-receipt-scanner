@@ -69,7 +69,7 @@ def test_chat_caps_max_tokens(monkeypatch):
 
     monkeypatch.setattr(llm.httpx, "Client", C)
     assert llm.chat("s", "u", max_tokens=5000) == "ok"
-    assert sent["max_tokens"] <= 256
+    assert sent["max_tokens"] <= 400
 
 
 def test_think_block_removed(monkeypatch):

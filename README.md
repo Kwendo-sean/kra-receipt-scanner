@@ -140,15 +140,15 @@ All check results are stored. So are the raw OCR text, every frame and the stitc
 
 | Report | Contents |
 |---|---|
-| Monthly input-VAT schedule | One row per receipt (supplier, PIN, CU invoice number, taxable value, VAT, claimable and why), totals by printed rate, and the VAT3 due date (the 20th of the following month) |
-| Claimability & compliance | Receipts with no eTIMS number, no PIN, no VAT, or a claim window that is closed or closing, with what to do about each. Also covers the income-tax eTIMS rule, the supplier-declaration risk, and penalties ("check with KRA") |
-| Spending summary | Spending and VAT paid by supplier, by category and by month |
-| Single receipt | Every field, which fields you corrected, the checks, the line items, the image(s) and the raw OCR text |
-| Explain my month | Plain-English narrative from the local model |
+| Monthly input-VAT schedule | Key figures, claimable VAT by supplier (bar chart), one row per receipt (supplier, PIN, CU invoice number, taxable value, VAT, claimable and why), the receipts to fix before filing, totals by printed rate, the VAT3 due date with days left, and next steps |
+| Claimability & compliance | Receipts with no eTIMS number, no PIN, no VAT, or a claim window that is closed or closing; the most common problems; which supplier to contact first and what to ask for; next steps. Also covers the income-tax eTIMS rule, the supplier-declaration risk, and penalties ("check with KRA") |
+| Spending summary | Key figures, the change from the previous month, where the money went (bar charts), biggest purchases, the items you spent most on, and spending and VAT by supplier, category and month with shares |
+| Single receipt | Every field, which fields you corrected, what to do, the checks, the line items, the image(s) and the raw OCR text |
+| Explain my month | Plain-English brief from the local model: the month against the last one, where the money went, what you can claim, what needs fixing and who to contact, and numbered next steps |
 
-**Formats:** on-screen HTML, PDF (ReportLab), XLSX and CSV.
+**Formats:** on-screen HTML, PDF (ReportLab), XLSX and CSV. All of them use the app's look (DM Sans and IBM Plex Mono, off-white paper, red accent). A saved or emailed HTML report carries its stylesheet and fonts inside the file, so it looks the same offline. The PDF fonts are in `app/fonts/`.
 
-**How the model is used:** the model context is 1024 tokens, so each section gets a fact sheet of at most about 300 tokens and the model writes at most 256 tokens. Calls are made one at a time, with a timeout. A paragraph containing a number that is not in its fact sheet is retried once and then replaced by a template sentence. If `llama-server` is down, reports render with template prose and say so. Model output is stripped of markup and escaped before display.
+**How the model is used:** `llama-server` runs with a 2048-token context. Each section gets a fact sheet of at most about 550 tokens (every figure, share and comparison already computed in Python) and the model writes at most 400 tokens. Calls are made one at a time, with a 150 s timeout, so a full "Explain my month" report takes a few minutes on the Pi. A paragraph containing a number that is not in its fact sheet is retried once and then replaced by a template paragraph. If `llama-server` is down, reports render with template prose and say so. Model output is stripped of markup and escaped before display.
 
 The Kenyan rules live in [app/kra_rules.py](app/kra_rules.py), with dates and sources:
 - 16% standard rate.
@@ -190,6 +190,14 @@ RS_DATA_DIR=/tmp/rs-demo python -m app.worker
 
 **Real-photo test set:** put `tests/fixtures/real/<name>.jpg` (for multi-section receipts, `<name>_1.jpg`, `<name>_2.jpg`, …) with a matching `<name>.json` of expected fields, then run `scripts/eval_ocr.py`. This folder is git-ignored, so real receipts never reach the repository.
 
+**Start fresh:** to delete every receipt, photo, report and queued email while keeping paired phones, Shortcut keys, email recipients and settings:
+
+```bash
+sudo systemctl stop receipt-app receipt-worker
+.venv/bin/python scripts/clear_receipts.py      # asks you to type DELETE
+sudo systemctl start receipt-app receipt-worker
+```
+
 **Peak RAM:** on the Pi, with `llama-server` running, run `.venv/bin/python scripts/measure_ram.py`. It processes an 8-section, 120-item receipt and then builds a report, and prints peak RSS and system memory use.
 
 ## Layout
@@ -198,7 +206,7 @@ RS_DATA_DIR=/tmp/rs-demo python -m app.worker
 app/        config, kra_rules, textparse, parser, checks, lines, preprocess, ocr, stitch, pipeline,
             receipts, db (SQLite + job queue), llm, reports, render, emailer, auth, worker, main, pair_cli
 app/static  app.js (UI), scanner.js (camera, sharpness, auto-capture), pair.js, app.css
-deploy/     systemd units          scripts/  install_pi.sh, make_certs.sh, eval_ocr.py, measure_ram.py, demo_seed.py
+deploy/     systemd units          scripts/  install_pi.sh, make_certs.sh, eval_ocr.py, measure_ram.py, demo_seed.py, clear_receipts.py
 tests/      synth.py (synthetic receipts and ground truth), parser, rules, stitching, llm, app/auth/reports/outbox, OCR e2e
 ```
 

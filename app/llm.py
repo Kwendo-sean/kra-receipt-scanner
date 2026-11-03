@@ -16,13 +16,14 @@ import httpx
 from app import config
 
 _lock = threading.Lock()  # one request at a time (llama-server runs one well)
-FACT_BUDGET_CHARS = 1100  # ~300 tokens; context is only 1024 tokens
+FACT_BUDGET_CHARS = 2000  # ~550 tokens; llama-server runs with a 2048-token context
 
 SYSTEM = (
-    "You write short, plain-English paragraphs for a Kenyan VAT record-keeping report. "
-    "Use ONLY the facts given. Copy every number exactly as written in the facts. "
-    "Never calculate, round, estimate or invent numbers, dates or names. "
-    "No headings, no lists, no markdown. At most two short paragraphs."
+    "You write clear, plain-English paragraphs for a Kenyan small-business VAT and spending report. "
+    "Use ONLY the facts given. Copy every number exactly as written in the facts, with KES before amounts. "
+    "Never calculate, add, subtract, round, estimate or invent numbers, dates or names. "
+    "Be specific: name the suppliers and amounts from the facts and say what to do. "
+    "No headings, no lists, no markdown. Separate paragraphs with a blank line. At most three short paragraphs."
 )
 
 
@@ -133,7 +134,7 @@ def write_paragraph(task: str, facts: dict, fallback: str, enabled: bool = True)
             out = sanitize(chat(SYSTEM, user))
         except LLMUnavailable:
             return fallback, "template_offline"
-        if out and not check_numbers(out, facts_text) and len(out) < 1500:
+        if out and not check_numbers(out, facts_text) and len(out) < 2400:
             return out, "llm" if attempt == 1 else "llm_retry"
         user = (f"Facts:\n{facts_text}\n\nTask: {task}\n"
                 "Your previous answer used numbers that are not in the facts. "

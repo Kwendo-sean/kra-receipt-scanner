@@ -75,7 +75,7 @@ def write_report_files(rep: dict, out_dir: Path, formats: list[str]) -> dict[str
     files["json"] = str(out_dir / "report.json")
     if "html" in formats:
         p = out_dir / f"{stem}.html"
-        p.write_text(render.to_html(rep), encoding="utf-8")
+        p.write_text(render.to_html(rep, embed=True), encoding="utf-8")
         files["html"] = str(p)
     if "pdf" in formats:
         p = out_dir / f"{stem}.pdf"
