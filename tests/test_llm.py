@@ -76,3 +76,10 @@ def test_think_block_removed(monkeypatch):
     monkeypatch.setattr(llm, "chat", lambda *a, **k: "<think>maybe 999 or 1,000</think>Claim KES 1,206.90.")
     text, status = llm.write_paragraph("x", FACTS, "T")
     assert status == "llm" and text == "Claim KES 1,206.90."
+
+
+def test_model_headings_are_dropped():
+    out = llm.sanitize("Main Compliance Problems and Risk Assessment:\nTwo receipts lack eTIMS numbers.\n\n"
+                       "**Supplier to Deal With First**\nContact NAIVAS first.")
+    assert out == "Two receipts lack eTIMS numbers.\n\nContact NAIVAS first."
+    assert llm.sanitize("Claim 5 receipts") == "Claim 5 receipts"  # a lone short answer is kept

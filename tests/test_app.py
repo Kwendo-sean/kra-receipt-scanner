@@ -256,6 +256,28 @@ def test_reports_carry_figures_steps_and_comparison(client):
     assert sp["data"]["compare"]["change"] == pytest.approx(250 - 2480)
 
 
+def test_duplicate_scans_stay_out_of_totals_and_suppliers_group_by_pin(client):
+    from app import reports
+    csrf = _pair(client)
+    t = synth.supermarket_16_exempt().text
+    first, second = _scan(client, csrf, t), _scan(client, csrf, t)  # the same receipt scanned twice
+    renamed = _scan(client, csrf, synth.etims_gross_style().text)
+    client.patch(f"/api/receipts/{renamed}", json={"changes": {"seller_name": "QM Ltd"}},
+                 headers={"X-CSRF-Token": csrf})
+    vs = reports.build("vat_schedule", {"period": "2026-10"}, today=date(2026, 11, 1), use_llm=False)
+    assert vs["data"]["n_claimable"] == 2 and vs["data"]["claimable_vat"] == pytest.approx(264.82)
+    assert vs["data"]["unclaimable_vat"] == 0  # the copy is not "VAT at risk" either
+    sched = next(s for s in vs["sections"] if s["heading"] == "Purchases schedule")["tables"][0]["rows"]
+    assert any(f"Duplicate of receipt #{first}" in r[7] for r in sched)
+    sp = reports.build("spending", {"period": "2026-10"}, today=date(2026, 11, 1), use_llm=False)
+    assert sp["data"]["total"] == pytest.approx(1600 + 880)
+    comp = reports.build("compliance", {"period": "2026-10"}, today=date(2026, 11, 1), use_llm=False)
+    steps = next(s for s in comp["sections"] if s["heading"] == "Next steps")["bullets"]
+    assert any(f"Delete receipt #{second}" in s for s in steps)
+    # a corrected name wins, and the PIN carries it to the supplier tables
+    assert any(r[0] == "QM Ltd" for r in next(s for s in sp["sections"] if s["heading"] == "By supplier")["tables"][0]["rows"])
+
+
 def test_saved_html_report_is_self_contained(client):
     from app import render, reports
     csrf = _pair(client)

@@ -164,3 +164,17 @@ def test_mangled_year_is_left_unread_not_guessed():
     # the one safe repair: letter O for zero
     assert str(find_date("07 Jun 2O26 14:55")) == "2026-06-07"
     assert str(find_date("07 Jun 26")) == "2026-06-07"
+
+
+@pytest.mark.parametrize("header, name", [
+    (["SCAN TO", "DOWNLOAD", "NAIVAS APP", "NAIVAS LIMITED", "P.O BOX 61600 - 00100 NAIROBI", "PIN:P051123223G"],
+     "NAIVAS LIMITED"),
+    (["KIKWETU VEARS", "NAIVAS LIMITED", "TELEPHONE NO: 0716478491", "PIN:P051123223G"], "NAIVAS LIMITED"),
+    (["NAIROBI SPORTS HOUSE LIMITED", "YAYA BRANCH", "P.O. BOX 45458-00100", "PIN: P000600799B"],
+     "NAIROBI SPORTS HOUSE LIMITED"),
+    (["Trafford Park", "Mombasa Road,", "Syokimau, Kenya", "Pin No P000601772P"], "Trafford Park"),
+    (["START OF FISCAL RECEIPT", "ITEM Q.TY PRICE AMOUNT", "ONIONS RED P/KG 363.00"], None),
+])
+def test_seller_name_skips_banners_and_addresses(header, name):
+    from app.parser import _seller_name
+    assert _seller_name(header) == name

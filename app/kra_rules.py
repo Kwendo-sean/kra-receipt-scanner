@@ -203,8 +203,10 @@ def assess(receipt: dict, today: date) -> Claimability:
 
 
 ACTIONS = {
-    "Supplier KRA PIN not printed": "Ask the supplier for an eTIMS invoice showing their PIN.",
-    "No eTIMS / CU invoice number": "Ask the supplier to issue an eTIMS invoice (with CU number) for this purchase.",
+    "Supplier KRA PIN not printed": "If the photo shows the supplier's KRA PIN, enter it; otherwise ask the "
+                                    "supplier for an eTIMS invoice showing their PIN.",
+    "No eTIMS / CU invoice number": "If the photo shows a CU invoice number, enter it; otherwise ask the supplier "
+                                    "to issue an eTIMS invoice for this purchase.",
     "No VAT shown": "If VAT was charged, request a tax invoice that states the VAT; otherwise it cannot be claimed.",
     "No VAT charged (exempt / zero-rated only)": "Nothing to claim; keep as an expense record.",
     "Receipt date missing": "Enter the receipt date from the photo.",
@@ -216,6 +218,8 @@ def action_for(reason: str) -> str:
         return "Too late to claim this input VAT; keep it as an expense record."
     if reason.startswith("Claim window closes"):
         return "Include it in your next VAT3 return before the deadline."
+    if reason.startswith("Duplicate of"):
+        return "Delete this copy if it is the same receipt scanned twice; it is left out of the totals."
     if reason.startswith("Check failed"):
         return "Compare the figures with the photo and correct any misread field."
     return ACTIONS.get(reason, "Review this receipt against the photo.")

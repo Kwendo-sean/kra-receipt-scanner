@@ -23,7 +23,9 @@ SYSTEM = (
     "Use ONLY the facts given. Copy every number exactly as written in the facts, with KES before amounts. "
     "Never calculate, add, subtract, round, estimate or invent numbers, dates or names. "
     "Be specific: name the suppliers and amounts from the facts and say what to do. "
-    "No headings, no lists, no markdown. Separate paragraphs with a blank line. At most three short paragraphs."
+    "Each fact's name says exactly what its number means: never use a number for anything else. "
+    "Never write headings, titles or labels such as 'Summary:'; start straight with a sentence. "
+    "No lists, no markdown. Separate paragraphs with a blank line. At most three short paragraphs."
 )
 
 
@@ -112,6 +114,14 @@ def facts_to_text(facts: dict) -> str:
     return text[:FACT_BUDGET_CHARS]
 
 
+def _is_heading(line: str, more_follows: bool) -> bool:
+    """'Main Compliance Problems and Risk Assessment:' - a short line that isn't a sentence,
+    sitting above more text."""
+    s = line.strip()
+    return bool(s) and len(s.split()) <= 9 and (
+        s.endswith(":") or (more_follows and not re.search(r"[.!?)\]\"']$", s)))
+
+
 def sanitize(text: str) -> str:
     """Plain text only: strip any markup the model produced. (Templates also autoescape.)"""
     # reasoning models (e.g. Qwen3) may emit a <think> block first: drop it whole
@@ -119,6 +129,9 @@ def sanitize(text: str) -> str:
     t = bleach.clean(text, tags=[], attributes={}, strip=True)
     t = re.sub(r"[*_#`>]+", "", t)
     t = re.sub(r"[ \t]+", " ", t)
+    lines = t.split("\n")
+    t = "\n".join(ln for i, ln in enumerate(lines)
+                  if not _is_heading(ln, any(x.strip() for x in lines[i + 1:])))
     t = re.sub(r"\n{3,}", "\n\n", t)
     return t.strip()
 

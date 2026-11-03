@@ -263,14 +263,36 @@ def _pdf_fonts() -> dict:
     return {"sans": "DMSans-300", "sans_b": "DMSans-500", "mono": "IBMPlexMono-400", "mono_b": "IBMPlexMono-500"}
 
 
-def _col_widths(columns: list, rows: list, avail: float) -> list[float]:
-    """Share the width by how much text each column holds (capped, so one long column can't starve the rest)."""
-    weights = []
-    for i, c in enumerate(columns):
-        longest = max([round(len(str(c)) * 1.25)] + [len(_fmt(r[i], False)) for r in rows[:80] if i < len(r)])
-        weights.append(min(42, longest) + 4)  # + cell padding
-    tot = sum(weights)
-    return [avail * w / tot for w in weights]
+def _col_widths(tbl: dict, avail: float, F: dict) -> list[float]:
+    """Short columns (dates, amounts, counts) get the width their longest text needs, so they
+    never wrap; the long text columns share what is left in proportion to their text."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    pad = 13  # cell padding, pt
+    mc = set(tbl["money_cols"])
+    rows = tbl["rows"][:120] + ([tbl["totals"]] if tbl.get("totals") else [])
+    need = []
+    for i, col in enumerate(tbl["columns"]):
+        w = stringWidth(str(col).upper(), F["mono_b"], 6.3)
+        for r in rows:
+            if i < len(r):
+                txt = _fmt(r[i], i in mc)
+                w = max(w, stringWidth(txt, F["mono"], 7.5) if i in mc else stringWidth(txt, F["sans"], 8))
+        need.append(w + pad)
+    short = [i for i, w in enumerate(need) if w <= avail * 0.2]
+    fixed = sum(need[i] for i in short)
+    long_ = [i for i in range(len(need)) if i not in short]
+    if not long_ or fixed > avail * 0.75:
+        tot = sum(need)
+        return [avail * w / tot for w in need]
+    rest = avail - fixed
+    # every text column first gets a fair floor (a supplier name shouldn't break mid-word),
+    # then what is left goes to the columns with the most text
+    floor = {i: min(need[i], rest / len(long_), avail * 0.17) for i in long_}
+    spare = rest - sum(floor.values())
+    extra = {i: max(0.0, min(need[i], avail) - floor[i]) for i in long_}
+    tot_extra = sum(extra.values()) or 1.0
+    return [need[i] if i in short else floor[i] + spare * extra[i] / tot_extra for i in range(len(need))]
 
 
 def to_pdf(rep: dict) -> bytes:
@@ -429,7 +451,7 @@ def to_pdf(rep: dict) -> bytes:
                                                              + [""] * (len(tbl["columns"]) - 1)]
             if tbl.get("totals"):
                 data.append(row_cells(tbl["totals"], bold=True))
-            t = Table(data, repeatRows=1, colWidths=_col_widths(tbl["columns"], tbl["rows"], avail_w))
+            t = Table(data, repeatRows=1, colWidths=_col_widths(tbl, avail_w, F))
             style = [("LINEBELOW", (0, 0), (-1, 0), 0.6, line), ("LINEBELOW", (0, 1), (-1, -1), 0.35, line_soft),
                      ("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, -1), 4),
                      ("BOTTOMPADDING", (0, 0), (-1, -1), 4), ("LEFTPADDING", (0, 0), (0, -1), 0)]

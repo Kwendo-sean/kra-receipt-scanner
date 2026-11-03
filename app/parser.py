@@ -109,15 +109,30 @@ def _find_label(lines: list[str], rx: re.Pattern) -> str | None:
     return None
 
 
+# A registered business name usually carries one of these (OCR slips included: LINITED, LIMTED).
+KEY_COMPANY = re.compile(r"\b(?:L[I1l][MN][I1l]?TED|LTD|PLC|LLP|INC|SUPER\s*MARKETS?|HYPER\s*MARKETS?|ENTERPRISES?|"
+                         r"PHARMACY|CHEMISTS?|HOTELS?|RESTAURANT|STATION|PETROLEUM|ENERGY|STORES)\b", re.I)
+# Banners printed above the name ("SCAN TO DOWNLOAD NAIVAS APP", "KILA SIKU") and location lines.
+KEY_NOT_NAME = re.compile(r"SCAN|DOWNLOAD|\bAPP\b|KILA\s*SIKU|THANK|FISCAL|ITEM|Q\.?TY|PRICE|AMOUNT|DESCRIPTION|"
+                          r",\s*KENYA|^\W*(?:NAIROBI|MOMBASA|KISUMU|NAKURU|ELDORET|KENYA)\W*$", re.I)
+
+
 def _seller_name(lines: list[str]) -> str | None:
-    for ln in lines[:8]:
-        s = ln.strip()
-        if sum(c.isalpha() for c in s) < 3:
-            continue
-        if KEY_HEADER_SKIP.search(s) or tp.amounts(s) or tp.find_date(s):
-            continue
-        return _clean(s)
-    return None
+    """The business name from the header: a line with a company word if there is one,
+    else the first plain line. Never past the first PIN / START OF FISCAL RECEIPT."""
+    head = []
+    for ln in lines[:12]:
+        if re.search(r"START\s*OF|FISCAL\s*RECEIPT", ln, re.I) or (head and tp.find_pins(ln)):
+            break
+        head.append(ln.strip())
+    named = [s for s in head if sum(c.isalpha() for c in s) >= 3 and not KEY_NOT_NAME.search(s)
+             and not tp.amounts(s) and not tp.find_date(s)]
+    for s in named:
+        # "SPORTS HOUSE LIMITED" is a name, so only contact details rule a company line out
+        if KEY_COMPANY.search(s) and not re.search(r"P\.?O\.?\s*BOX|BOX\s*\d|TEL|PHONE|@|WWW\.|\bPIN\b", s, re.I):
+            return _clean(s)
+    plain = [s for s in named if not KEY_HEADER_SKIP.search(s)]
+    return _clean(plain[0]) if plain else None
 
 
 def _pins(lines: list[str]) -> tuple[str | None, str | None, list[str]]:

@@ -9,6 +9,7 @@ A report is a plain dict:
 """
 from __future__ import annotations
 
+import re
 import time
 from collections import defaultdict
 from datetime import date
@@ -27,7 +28,7 @@ KINDS = {
 
 D0 = Decimal("0")
 TOP_BARS = 8
-MAX_STEPS = 8
+MAX_STEPS = 10
 
 
 def kes(v) -> str:
@@ -75,11 +76,83 @@ def _days_note(days: int | None) -> str:
     return f"{days} days left"
 
 
+_SUFFIX = re.compile(r"\b(?:L[I1l][MN][I1l]?TED|LTD|PLC|LLP|INC|CO|COMPANY|KENYA|KE)\b", re.I)
+
+
+def _norm_name(name: str) -> str:
+    return re.sub(r"[^a-z]", "", _SUFFIX.sub(" ", name).lower())
+
+
+def _supplier_names() -> tuple[dict[str, str], dict[str, str]]:
+    """One display name per supplier, from every processed receipt.
+
+    Receipts with the same KRA PIN are the same business: they share the name
+    read best (one with a company word such as LIMITED, else the most common,
+    with the user's corrections counted first). Receipts without a PIN join a
+    PIN group only when their cleaned-up name matches exactly - no fuzzy guesses.
+    """
+    from app.parser import KEY_COMPANY
+    by_pin: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for row in db.all_("SELECT seller_name, seller_pin, corrections_json FROM receipts "
+                       "WHERE deleted=0 AND status='done' AND seller_name IS NOT NULL AND seller_pin IS NOT NULL"):
+        corrected = "seller_name" in (db.jload(row["corrections_json"], {}) or {})
+        by_pin[row["seller_pin"]][row["seller_name"].strip()] += 100 if corrected else 1
+    pin_name = {}
+    for pin, names in by_pin.items():
+        pin_name[pin] = max(names, key=lambda n: (names[n] >= 100, bool(KEY_COMPANY.search(n)), names[n], len(n)))
+    norm_name = {_norm_name(n): n for n in pin_name.values() if _norm_name(n)}
+    return pin_name, norm_name
+
+
+def _duplicates() -> dict[int, int]:
+    """{receipt id: id of the earlier receipt it repeats}. The same receipt scanned twice
+    shares its CU invoice number, or its supplier + date + time to the second + total,
+    or its supplier + receipt number."""
+    seen: dict[tuple, int] = {}
+    dup: dict[int, int] = {}
+    for row in db.all_("SELECT * FROM receipts WHERE deleted=0 AND status='done' ORDER BY id"):
+        f = receipts.effective(row)
+        ident = f.get("seller_pin") or _norm_name(f.get("seller_name") or "")
+        keys = []
+        if f.get("cu_invoice_no"):
+            keys.append(("cu", f["cu_invoice_no"]))
+        if ident and f.get("receipt_date") and f.get("receipt_time") and f.get("total") is not None:
+            keys.append(("when", ident, f["receipt_date"], f["receipt_time"], float(f["total"])))
+        if ident and f.get("receipt_no"):
+            keys.append(("no", ident, f["receipt_no"]))
+        first = next((seen[k] for k in keys if k in seen), None)
+        if first is not None:
+            dup[row["id"]] = first
+        for k in keys:
+            seen.setdefault(k, first or row["id"])
+    return dup
+
+
+def _annotate(rs: list[dict]) -> list[dict]:
+    """Supplier display names, and duplicates marked so they stay out of every total."""
+    pin_name, norm_name = _supplier_names()
+    dup = _duplicates()
+    for r in rs:
+        if r["id"] in dup and r["claim"] is not None:
+            r["duplicate_of"] = dup[r["id"]]
+            r["claim"] = dict(r["claim"], claimable=False,
+                              reasons=[f"Duplicate of receipt #{dup[r['id']]}"] + r["claim"]["reasons"])
+        f = r["fields"]
+        name = (f.get("seller_name") or "").strip()
+        if "seller_name" in r["corrections"] and name:
+            r["supplier"] = name
+        elif f.get("seller_pin") in pin_name:
+            r["supplier"] = pin_name[f["seller_pin"]]
+        else:
+            r["supplier"] = norm_name.get(_norm_name(name)) or name or None
+    return rs
+
+
 def select(params: dict, today: date) -> list[dict]:
-    return receipts.query(period=params.get("period"), date_from=params.get("date_from"),
-                          date_to=params.get("date_to"), supplier=params.get("supplier"),
-                          ids=params.get("ids"), claimable=params.get("claimable"),
-                          category=params.get("category"), today=today)
+    return _annotate(receipts.query(period=params.get("period"), date_from=params.get("date_from"),
+                                    date_to=params.get("date_to"), supplier=params.get("supplier"),
+                                    ids=params.get("ids"), claimable=params.get("claimable"),
+                                    category=params.get("category"), today=today))
 
 
 def _sec(heading: str, **kw) -> dict:
@@ -110,7 +183,7 @@ def _vat_taxable(r: dict) -> Decimal:
 
 
 def _name(r: dict) -> str:
-    return r["fields"].get("seller_name") or "(unknown supplier)"
+    return r.get("supplier") or r["fields"].get("seller_name") or "(unknown supplier)"
 
 
 def _footer() -> str:
@@ -137,37 +210,56 @@ def _due(params: dict, today: date) -> tuple[date | None, int | None]:
 _FIELD_LABELS = {"total": "total", "receipt_date": "date", "seller_name": "supplier name", "seller_pin": "supplier PIN"}
 
 
+_ASK = ("Supplier KRA PIN not printed", "No eTIMS / CU invoice number")
+
+
 def _issues(rs: list[dict]) -> dict:
     """Group what stops receipts being claimed, per supplier, with the VAT involved."""
     by_sup: dict[str, dict] = {}
-    closing, checks_failed, missing = [], [], []
+    closing, checks_failed, missing, duplicates = [], [], [], []
     for r in rs:
         c = r["claim"]
         if not c:
+            continue
+        if r.get("duplicate_of"):
+            duplicates.append(r)
             continue
         f = r["fields"]
         gaps = [lbl for k, lbl in _FIELD_LABELS.items() if f.get(k) in (None, "")]
         if gaps:
             missing.append((r, gaps))
-        for w in c["warnings"]:
-            if w.startswith("Claim window closes"):
-                closing.append((r, c.get("deadline")))
-            elif w.startswith("Check failed"):
-                checks_failed.append((r, w.split(":", 1)[1].strip()))
+        failed = [w.split(":", 1)[1].strip() for w in c["warnings"] if w.startswith("Check failed")]
+        if failed:
+            checks_failed.append((r, failed))
+        closes = c.get("deadline") if any(w.startswith("Claim window closes") for w in c["warnings"]) else None
         if c["claimable"]:
+            if closes:
+                closing.append((r, closes))
             continue
-        name = _name(r)
-        e = by_sup.setdefault(name, {"receipts": 0, "vat": D0, "reasons": defaultdict(int)})
+        if any(x.startswith("Claim window closed") for x in c["reasons"]) or not r.get("supplier"):
+            continue  # too late to fix, or no supplier to contact (the missing name is its own step)
+        e = by_sup.setdefault(_name(r), {"receipts": 0, "vat": D0, "reasons": defaultdict(int), "closes": None})
         e["receipts"] += 1
         e["vat"] += _d(r["vat"])
+        if closes and not any(x.startswith("Claim window closed") for x in c["reasons"]):
+            e["closes"] = min(filter(None, [e["closes"], closes]))
         for reason in c["reasons"]:
             e["reasons"][reason.split(" on ")[0]] += 1
     rows = []
     for name, e in sorted(by_sup.items(), key=lambda kv: (-kv[1]["vat"], -kv[1]["receipts"])):
-        main = max(e["reasons"].items(), key=lambda kv: kv[1])[0] if e["reasons"] else "Not claimable"
+        ask = [x for x in _ASK if e["reasons"].get(x)]
+        if len(ask) == 2:
+            main, action = "No eTIMS invoice and no supplier PIN",                 "Ask the supplier for an eTIMS invoice showing their KRA PIN and CU invoice number."
+        elif ask:
+            main = ask[0]
+            action = rules.action_for(main)
+        else:
+            main = max(e["reasons"].items(), key=lambda kv: kv[1])[0] if e["reasons"] else "Not claimable"
+            action = rules.action_for(main)
         rows.append({"supplier": name, "receipts": e["receipts"], "vat": e["vat"], "reason": main,
-                     "action": rules.action_for(main)})
-    return {"suppliers": rows, "closing": closing, "checks_failed": checks_failed, "missing": missing}
+                     "action": action, "ask": bool(ask), "closes": e["closes"]})
+    return {"suppliers": rows, "closing": closing, "checks_failed": checks_failed, "missing": missing,
+            "duplicates": duplicates}
 
 
 def _next_steps(iss: dict, due: date | None, days: int | None, period_label: str) -> list[str]:
@@ -179,20 +271,26 @@ def _next_steps(iss: dict, due: date | None, days: int | None, period_label: str
         else:
             steps.append(f"File the VAT3 return for {period_label} by {due.isoformat()} ({_days_note(days)}).")
     for r, dl in iss["closing"][:3]:
-        steps.append(f"Claim receipt #{r['id']} from {_name(r)} before {dl}, or the VAT on it is lost.")
-    for s in iss["suppliers"][:4]:
-        if s["reason"].startswith(("Supplier KRA PIN", "No eTIMS")):
-            vat = f", KES {kes(s['vat'])} of VAT" if s["vat"] else ""
-            steps.append(f"Ask {s['supplier']} for an eTIMS invoice showing their KRA PIN "
-                         f"({s['receipts']} receipt(s){vat}).")
-        elif s["reason"] == "Receipt date missing":
-            steps.append(f"Enter the date on the {s['supplier']} receipt(s) from the photo.")
-    for r, label in iss["checks_failed"][:3]:
-        steps.append(f"Check receipt #{r['id']} from {_name(r)} against the photo: \"{label}\" failed.")
+        steps.append(f"Include receipt #{r['id']} from {_name(r)} in your next VAT3 return: its claim window "
+                     f"closes on {dl}.")
+    for r in iss["duplicates"][:3]:
+        steps.append(f"Delete receipt #{r['id']} if it is receipt #{r['duplicate_of']} scanned twice "
+                     "(same supplier, date and amount); it is left out of the totals.")
+    for s in [s for s in iss["suppliers"] if s["ask"]][:4]:
+        vat = f", KES {kes(s['vat'])} of VAT" if s["vat"] else ""
+        when = f" before {s['closes']}, when the claim window closes" if s["closes"] else ""
+        what = {"No eTIMS / CU invoice number": "a CU invoice number",
+                "Supplier KRA PIN not printed": "the supplier's KRA PIN"}.get(s["reason"],
+                                                                          "the supplier's KRA PIN and a CU invoice number")
+        steps.append(f"{s['supplier']} ({s['receipts']} receipt(s){vat}): check the photo for {what} and enter it; "
+                     f"if it isn't printed, ask them for an eTIMS invoice{when}.")
+    for r, labels in iss["checks_failed"][:3]:
+        steps.append(f"Check receipt #{r['id']} from {_name(r)} against the photo and correct any misread "
+                     f"figure (failed: {'; '.join(labels)}).")
     for r, gaps in iss["missing"][:3]:
-        steps.append(f"Fill in the missing {', '.join(gaps)} on receipt #{r['id']}.")
+        steps.append(f"Fill in the missing {', '.join(gaps)} on receipt #{r['id']} from the photo.")
     out = []
-    for s in steps:  # a receipt can show up under two headings
+    for s in steps:
         if s not in out:
             out.append(s)
     if len(out) == (1 if due else 0):
@@ -217,9 +315,12 @@ def _spend(rs: list[dict]) -> dict:
     mon: dict[str, list] = defaultdict(lambda: [D0, D0, 0])
     items: dict[str, list] = defaultdict(lambda: [D0, D0, 0, ""])
     total = vat = D0
-    counted, missing_total = [], 0
+    counted, missing_total, dups = [], 0, 0
     for r in rs:
         f = r["fields"]
+        if r.get("duplicate_of"):
+            dups += 1
+            continue
         if f.get("total") is None:
             missing_total += 1
             continue
@@ -245,7 +346,7 @@ def _spend(rs: list[dict]) -> dict:
     n = len(counted)
     biggest = sorted(counted, key=lambda rt: -rt[1])[:5]
     return {"sup": sup, "cat": cat, "mon": mon, "items": items, "total": total, "vat": vat, "n": n,
-            "missing_total": missing_total, "avg": (total / n).quantize(Decimal("0.01")) if n else D0,
+            "missing_total": missing_total, "duplicates": dups, "avg": (total / n).quantize(Decimal("0.01")) if n else D0,
             "biggest": biggest,
             "sup_sorted": sorted(sup.items(), key=lambda kv: -kv[1][0]),
             "cat_sorted": sorted(cat.items(), key=lambda kv: -kv[1][0]),
@@ -257,7 +358,7 @@ def _compare(params: dict, today: date, total: Decimal) -> dict | None:
     if not params.get("period"):
         return None
     prev = _prev_period(params["period"])
-    rs = receipts.query(period=prev, today=today)
+    rs = [r for r in _annotate(receipts.query(period=prev, today=today)) if not r.get("duplicate_of")]
     ptotal = sum((_d(r["fields"].get("total")) for r in rs if r["fields"].get("total") is not None), D0)
     if not rs or not ptotal:
         return None
@@ -292,7 +393,7 @@ def vat_schedule(params: dict, today: date, use_llm: bool) -> dict:
         c = r["claim"] or {"claimable": False, "reasons": ["Not processed"], "warnings": []}
         tx = _vat_taxable(r)
         vat = _d(r["vat"]) if r["vat"] is not None else None
-        rows.append([f.get("receipt_date") or "", f.get("seller_name") or "", f.get("seller_pin") or "MISSING",
+        rows.append([f.get("receipt_date") or "", _name(r), f.get("seller_pin") or "MISSING",
                      f.get("cu_invoice_no") or "MISSING", float(tx), None if vat is None else float(vat),
                      "Yes" if c["claimable"] else "No", "; ".join(c["reasons"] + c.get("warnings", [])) or "OK"])
         if c["claimable"]:
@@ -306,7 +407,7 @@ def vat_schedule(params: dict, today: date, use_llm: bool) -> dict:
                     e[0] += _d(b.get("taxable"))
                     e[1] += _d(b.get("vat"))
                     e[2] += 1
-        elif vat:
+        elif vat and not r.get("duplicate_of"):
             blocked.append((r, vat, c["reasons"]))
     unclaim_vat = sum((v for _, v, _ in blocked), D0)
     due, days = _due(params, today)
@@ -378,11 +479,21 @@ def vat_schedule(params: dict, today: date, use_llm: bool) -> dict:
 # ------------------------------------------------------------------ 2. compliance
 
 
+def _problem(reason: str) -> str:
+    """'Claim window closes on 2026-11-30' -> 'Claim window closes'; similar reasons share one row."""
+    if reason.startswith("Duplicate of"):
+        return "Scanned twice"
+    if reason.startswith("Check failed"):
+        return "Figures don't add up"
+    return reason.split(" on ")[0].split(":")[0]
+
+
 def compliance(params: dict, today: date, use_llm: bool) -> dict:
     rep = _base("compliance", params, today)
     rs = select(params, today)
     rows = []
-    counts: dict[str, int] = defaultdict(int)
+    counts: dict[str, int] = defaultdict(int)  # receipts per kind of problem
+    sample: dict[str, str] = {}
     soon = 0
     at_risk_vat = D0
     for r in rs:
@@ -392,29 +503,34 @@ def compliance(params: dict, today: date, use_llm: bool) -> dict:
         issues = c["reasons"] + c["warnings"]
         if not issues:
             continue
-        f = r["fields"]
-        for reason in issues:
-            key = reason.split(" on ")[0].split(":")[0]
+        for key in dict.fromkeys(_problem(i) for i in issues):
             counts[key] += 1
-            rows.append([f.get("receipt_date") or "", f.get("seller_name") or "", reason, rules.action_for(reason),
-                         None if r["vat"] is None else float(r["vat"])])
+            sample.setdefault(key, next(i for i in issues if _problem(i) == key))
+        actions = list(dict.fromkeys(rules.action_for(i) for i in (issues[:1] if r.get("duplicate_of") else issues)))
+        rows.append([r["fields"].get("receipt_date") or "", _name(r), f"#{r['id']}", "; ".join(issues),
+                     " ".join(actions), None if r["vat"] is None else float(r["vat"])])
         if any(w.startswith("Claim window closes") for w in c["warnings"]):
             soon += 1
-        if not c["claimable"] and r["vat"]:
+        if not c["claimable"] and r["vat"] and not r.get("duplicate_of"):
             at_risk_vat += _d(r["vat"])
-    n_fail = len({(row[0], row[1]) for row in rows})
+    n_fail = len(rows)
     iss = _issues(rs)
     due, days = _due(params, today)
     worst = iss["suppliers"][0] if iss["suppliers"] else None
     common = sorted(counts.items(), key=lambda kv: -kv[1])
+    # one fact per line, each stating exactly what its number is, so a small model can't mix them up
     facts = {"period": rep["subtitle"], "receipts checked": len(rs), "receipts with issues": n_fail,
              "receipts with no issues": len(rs) - n_fail,
-             "claim windows closing within 30 days": soon,
-             "VAT printed on non-claimable receipts KES": kes(at_risk_vat)}
-    if worst:
-        facts["supplier with the most VAT at risk"] = f"{worst['supplier']} KES {kes(worst['vat'])}, {worst['reason']}"
+             "total VAT at risk, all receipts together, KES": kes(at_risk_vat),
+             "receipts whose claim window closes within 30 days": soon}
     for k, v in common[:4]:
-        facts[f"issue: {k}"] = f"{v} receipt(s)"
+        facts[f"problem '{k}'"] = f"on {v} receipt(s)"
+    if worst:
+        facts["supplier to contact first"] = worst["supplier"]
+        if worst["vat"]:
+            facts["VAT at risk with that supplier only, KES"] = kes(worst["vat"])
+        facts["that supplier's problem"] = worst["reason"]
+        facts["what to ask that supplier for"] = worst["action"]
     fb = (f"{n_fail} of {len(rs)} receipts have issues, and KES {kes(at_risk_vat)} of printed VAT cannot be "
           f"claimed as things stand.")
     if common:
@@ -424,7 +540,7 @@ def compliance(params: dict, today: date, use_llm: bool) -> dict:
                + (f"it holds KES {kes(worst['vat'])} of that VAT. " if worst["vat"] else "")
                + worst["action"])
     if soon:
-        fb += f" {soon} claim window(s) close within 30 days, so claim those in your next VAT3 return."
+        fb += f" {soon} claim window(s) close within 30 days, so act on those first."
     s = _section("Summary", facts,
                  "Write two short paragraphs. First: what the main compliance problems are and how much VAT they "
                  "put at risk. Second: which supplier to deal with first and what to ask them for.", fb, use_llm)
@@ -436,12 +552,12 @@ def compliance(params: dict, today: date, use_llm: bool) -> dict:
     if common:
         rep["sections"].append(_sec("Most common problems", tables=[{
             "title": "", "columns": ["Problem", "Receipts", "What to do"], "money_cols": [],
-            "rows": [[k, v, rules.action_for(k)] for k, v in common], "totals": None}]))
+            "rows": [[k, v, rules.action_for(sample[k])] for k, v in common], "totals": None}]))
     if iss["suppliers"]:
         rep["sections"].append(_sec("Who to contact", tables=[_issues_table(iss)]))
     rep["sections"].append(_sec("Receipts that need attention", tables=[{
-        "title": "", "columns": ["Date", "Supplier", "Issue", "What to do", "VAT (KES)"],
-        "money_cols": [4], "rows": rows, "totals": None}]))
+        "title": "One row per receipt", "columns": ["Date", "Supplier", "Receipt", "Issues", "What to do", "VAT (KES)"],
+        "money_cols": [5], "rows": rows, "totals": None}]))
     rep["sections"].append(_sec("Next steps", bullets=_next_steps(iss, due, days, rep["subtitle"])))
     rep["sections"].append(_sec("Rules applied", prose_status="fixed", prose=" ".join([
         "Input VAT is claimable only on an eTIMS-transmitted invoice showing the supplier's KRA PIN, "
@@ -502,6 +618,8 @@ def spending(params: dict, today: date, use_llm: bool) -> dict:
         fb += f" The biggest single receipt was KES {kes(big[1])} from {_name(big[0])}."
     if sp["missing_total"]:
         fb += f" {sp['missing_total']} receipt(s) have no readable total and are left out: fill them in to include them."
+    if sp["duplicates"]:
+        fb += f" {sp['duplicates']} receipt(s) scanned twice are counted once."
     s = _section("Summary", facts,
                  "Write two short paragraphs. First: how much was spent and how that compares with the previous "
                  "month. Second: where the money went (top suppliers, largest category, biggest receipt).",
@@ -739,11 +857,15 @@ def narrative(params: dict, today: date, use_llm: bool) -> dict:
 
     # 4. what needs fixing
     worst = iss["suppliers"][0] if iss["suppliers"] else None
-    facts = {"receipts with issues": co["n_issues"], "claim windows closing within 30 days": co["closing_soon"],
-             "VAT that cannot be claimed yet KES": kes(co["at_risk_vat"])}
+    facts = {"receipts with issues": co["n_issues"],
+             "receipts whose claim window closes within 30 days": co["closing_soon"],
+             "total VAT that cannot be claimed yet, all receipts together, KES": kes(co["at_risk_vat"])}
     if worst:
-        facts["supplier with the most VAT at risk"] = f"{worst['supplier']} KES {kes(worst['vat'])}, {worst['reason']}"
-        facts["what to ask for"] = worst["action"]
+        facts["supplier to contact first"] = worst["supplier"]
+        if worst["vat"]:
+            facts["VAT at risk with that supplier only, KES"] = kes(worst["vat"])
+        facts["that supplier's problem"] = worst["reason"]
+        facts["what to ask that supplier for"] = worst["action"]
     if not co["n_issues"]:
         fb = "Nothing needs fixing: every receipt has the supplier PIN, an eTIMS invoice number and readable figures."
     else:
